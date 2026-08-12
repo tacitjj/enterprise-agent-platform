@@ -22,7 +22,7 @@ import org.springframework.stereotype.Repository;
  * fenced in SQL; a database failure propagates so the surrounding transaction rolls back.
  */
 @Repository
-public final class JdbcContextIndexDispatchRepository implements ContextIndexDispatchRepository {
+public class JdbcContextIndexDispatchRepository implements ContextIndexDispatchRepository {
 
     static final String CLAIM_SQL = """
             WITH candidate AS (

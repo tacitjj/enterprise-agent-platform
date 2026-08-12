@@ -74,23 +74,37 @@ All credentials must come from environment variables or a local `.env`. The repo
 
 ## Quick start
 
-Create local configuration and start PostgreSQL:
+Create local configuration, set non-empty local-only values for
+`DIANLIAN_POSTGRES_PASSWORD` and `DIANLIAN_JWT_SECRET`, then start PostgreSQL
+and Redis:
 
 ```bash
 cp deploy/local/.env.example deploy/local/.env
-docker compose --env-file deploy/local/.env -f deploy/local/compose.yaml up -d postgres
+docker compose --env-file deploy/local/.env -f deploy/local/compose.yaml up -d postgres redis
 ```
 
-Build the Java bootstrap application:
+In the first terminal, load that configuration, map the Compose database
+settings to Spring Boot, then build and start the Java API:
 
 ```bash
+set -a
+source deploy/local/.env
+set +a
+export DIANLIAN_DB_URL="jdbc:postgresql://127.0.0.1:${DIANLIAN_POSTGRES_PORT}/${DIANLIAN_POSTGRES_DB}"
+export DIANLIAN_DB_USERNAME="${DIANLIAN_POSTGRES_USER}"
+export DIANLIAN_DB_PASSWORD="${DIANLIAN_POSTGRES_PASSWORD}"
 env JAVA_HOME=/path/to/java-21 mvn -f dianlian-platform/pom.xml \
   -pl dianlian-bootstrap -am -DskipTests package
+env JAVA_HOME=/path/to/java-21 java \
+  -jar dianlian-platform/dianlian-bootstrap/target/dianlian-bootstrap-0.1.0-SNAPSHOT.jar \
+  --spring.profiles.active=local
 ```
 
-Run the web application in API mode:
+Keep the Java process running. From a second terminal, verify that the API is
+live before starting the web application in API mode:
 
 ```bash
+curl --fail http://127.0.0.1:8080/actuator/health/liveness
 cd dianlian-web
 npm ci
 env VITE_DATA_SOURCE=api DIANLIAN_DEV_API_TARGET=http://127.0.0.1:8080 npm run dev

@@ -20,6 +20,7 @@ import com.dianlian.platform.context.api.ContextIndexDispatch.ResourceType;
 import com.dianlian.platform.context.api.ContextIndexDispatch.TombstoneProjection;
 import com.dianlian.platform.context.api.ContextIndexDispatch.TombstoneReason;
 import com.dianlian.platform.context.api.ContextIndexLeaseLostException;
+import java.lang.reflect.Modifier;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -38,6 +39,13 @@ class ContextIndexDispatchApplicationServiceTests {
     private static final UUID SPACE_ID = UUID.fromString("10000000-0000-4000-8000-000000000005");
     private static final UUID AGENT_ID = UUID.fromString("10000000-0000-4000-8000-000000000006");
     private static final UUID SCOPE_ID = UUID.fromString("10000000-0000-4000-8000-000000000007");
+
+    @Test
+    void transactionalServiceRemainsProxyableBySpring() {
+        assertThat(Modifier.isFinal(ContextIndexDispatchApplicationService.class.getModifiers()))
+                .as("@Transactional services must support Spring class-based proxies")
+                .isFalse();
+    }
 
     @Test
     void claimsThenMaterializesOnlyTheCurrentActivePublishedKnowledgeAuthority() {

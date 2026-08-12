@@ -2,9 +2,17 @@ package com.dianlian.platform.context.infrastructure;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.lang.reflect.Modifier;
 import org.junit.jupiter.api.Test;
 
 class JdbcContextIndexDispatchRepositoryTests {
+
+    @Test
+    void repositoryRemainsProxyableForSpringExceptionTranslation() {
+        assertThat(Modifier.isFinal(JdbcContextIndexDispatchRepository.class.getModifiers()))
+                .as("@Repository beans must support Spring class-based proxies")
+                .isFalse();
+    }
 
     @Test
     void claimSqlUsesBoundedPostgresSkipLockedAndLeaseEpochFencing() {
