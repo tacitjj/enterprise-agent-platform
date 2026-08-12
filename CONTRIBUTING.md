@@ -1,18 +1,61 @@
+**English** | [简体中文](CONTRIBUTING.zh-CN.md)
+
 # Contributing
 
-感谢你参与 Enterprise Agent Platform。
+Thank you for helping improve Enterprise Agent Platform. The repository is an early reference implementation, so focused changes with explicit boundaries are more useful than broad rewrites.
 
-## 开始之前
+## Before opening a change
 
-1. 先通过 Issue 说明问题、使用场景和预期行为。
-2. 一个 Pull Request 只处理一个清晰、可验证的主题。
-3. 不要提交密钥、真实账号、生产数据、内部地址或未经授权的素材。
-4. 涉及接口、权限、租户、计费或状态逻辑时，请同步说明影响面并补充测试。
+1. Search existing issues and the [roadmap](ROADMAP.md).
+2. Open an issue for behavior changes, cross-module work, or new architecture decisions.
+3. Keep each pull request independently reviewable and tied to one clear outcome.
+4. Never include credentials, real accounts, production data, private endpoints, or assets you are not authorized to publish.
 
-## 本地验证
+## Architecture boundaries
 
-- Java：运行受影响 Maven 模块的测试。
-- Python：在 `dianlian-ai-runtime` 中运行 `uv run pytest`。
-- Web：在 `dianlian-web` 中运行 `npm test` 和 `npm run build`。
+Changes that affect interfaces, authorization, tenants, tasks, billing, knowledge, memory, or state transitions must identify all affected consumers. In particular:
 
-请在 Pull Request 中写明实际执行的检查和仍未覆盖的风险。
+- Java remains authoritative for tenant, permission, task, billing, and audit facts.
+- Python integrations must use versioned internal contracts and fail closed.
+- Web API mode must not silently substitute prototype facts.
+- Shared OpenAPI and AsyncAPI changes require consumer impact analysis.
+
+## Local validation
+
+Run the smallest relevant checks first, then the complete check for every affected stack.
+
+### Java
+
+```bash
+env JAVA_HOME=/path/to/java-21 mvn -f dianlian-platform/pom.xml test
+```
+
+### Python
+
+```bash
+cd dianlian-ai-runtime
+uv sync --frozen
+uv run pytest
+```
+
+### Web
+
+```bash
+cd dianlian-web
+npm ci
+npm test
+npm run test:sites
+npm run build
+```
+
+## Pull requests
+
+Use the pull request template to describe:
+
+- the result and motivation;
+- the checked impact surface;
+- exact validation commands and outcomes;
+- untested risks or follow-up work;
+- security, compatibility, and migration considerations.
+
+By contributing, you agree that your contribution is licensed under the repository's [MIT License](LICENSE).
