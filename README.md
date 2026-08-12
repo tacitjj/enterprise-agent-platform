@@ -1,108 +1,144 @@
+**English** | [简体中文](README.zh-CN.md)
+
 # Enterprise Agent Platform
 
-一个面向企业数字员工与 AI Agent 协作场景的早期参考实现。项目内部当前使用“点联”作为产品代号。
+[![CI](https://github.com/tacitjj/enterprise-agent-platform/actions/workflows/ci.yml/badge.svg)](https://github.com/tacitjj/enterprise-agent-platform/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Java 21](https://img.shields.io/badge/Java-21-ED8B00.svg)](dianlian-platform/pom.xml)
+[![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-3776AB.svg)](dianlian-ai-runtime/pyproject.toml)
+[![React 19](https://img.shields.io/badge/React-19-61DAFB.svg)](dianlian-web/package.json)
+
+A governed, fail-closed reference platform for enterprise digital employees and AI agents. The project focuses on the control-plane problems that become critical beyond a chat demo: tenant isolation, authorization, durable execution, auditable context, model routing, and cost control.
 
 > [!WARNING]
-> 本项目处于早期开发阶段，仅用于本地研究、架构验证和社区协作，尚未经过生产环境安全加固或兼容性承诺。请勿直接用于生产或处理敏感数据。
+> This is an early-stage reference implementation for local research, architecture validation, and community collaboration. It has not completed production hardening or compatibility guarantees. Do not use it with sensitive data or deploy it to production without an independent security review.
 
-当前仓库包含三类不同性质的工程资产：
+## Why this project exists
 
-- `dianlian-web/`：已完成的高保真前端原型，正在通过 API adapter 逐步接入真实服务。
-- `dianlian-platform/`：Java 21 + Spring Boot + Spring Modulith 业务主系统。
-- `dianlian-ai-runtime/`：Python AI Runtime 防腐层；LlamaIndex 与 DeerFlow 只有在对应能力通过门禁后才启用。
-- `contracts/`：Java、Python 和 Web 共用的版本化接口与事件契约。
-- `deploy/local/`：仅用于本地开发的依赖编排，不包含线上配置。
+Enterprise agents rarely fail only because of model quality. They fail when model calls are allowed to become the source of truth for permissions, task state, memory, billing, or side effects. This repository explores a different boundary:
 
-## 当前开发边界
+- Java owns tenant, identity, authorization, task, billing, and audit truth.
+- Python provides a constrained anti-corruption boundary for retrieval and conditional agent runtimes.
+- React consumes real APIs through explicit adapters and never silently falls back to prototype data.
+- OpenAPI and AsyncAPI contracts version the boundaries shared by all three stacks.
+- Unavailable or unauthorized capabilities fail closed instead of fabricating success.
 
-第一批研发先建立可启动、可观测、失败关闭的工程内核，不伪造模型、知识检索或长任务成功：
+## Architecture
 
-1. Java 是租户、权限、任务、成果、审批和智点的业务真相。
-2. Python 只通过版本化内部 HTTP/SSE 契约接入，默认功能关闭。
-3. 前端 API 模式失败时不得静默回退演示数据。
-4. 小节点只运行编译、契约和高风险规则的最小验证；完整跨端回归在阶段闭环后统一执行。
+```mermaid
+flowchart LR
+    Web["React 19 web clients"] --> Contracts["Versioned OpenAPI / AsyncAPI contracts"]
+    Contracts --> Java["Java 21 + Spring Boot + Spring Modulith control plane"]
+    Java --> Truth["Tenant, ACL, task, billing and audit truth"]
+    Java --> Runtime["FastAPI runtime boundary"]
+    Runtime --> Context["Authorized knowledge and memory retrieval"]
+    Runtime --> Agents["Conditional agent runtimes"]
+    Truth --> DB["PostgreSQL / pgvector"]
+    Context --> DB
+```
 
-## 本地依赖
+Read the concise [architecture overview](docs/architecture/overview.md) or the detailed [Chinese technical specification](docs/architecture/%E7%82%B9%E8%81%94%E6%95%B0%E5%AD%97%E5%91%98%E5%B7%A5V1%E6%8A%80%E6%9C%AF%E6%96%B9%E6%A1%88.md).
 
-- Java 21
-- Maven 3.8.6+
-- Python 3.12 与 `uv`
+## Repository map
+
+| Path | Responsibility |
+| --- | --- |
+| `dianlian-platform/` | Java 21 business control plane built with Spring Boot and Spring Modulith |
+| `dianlian-ai-runtime/` | FastAPI anti-corruption boundary for context and agent runtime integrations |
+| `dianlian-web/` | React 19 user, enterprise administration, and platform operation surfaces |
+| `contracts/` | Shared OpenAPI, AsyncAPI, and contract fixtures |
+| `deploy/local/` | Local-only PostgreSQL and Redis orchestration |
+| `docs/` | ADRs, product/design material, and the detailed architecture specification |
+
+## Implementation status
+
+| Area | Status | Boundary |
+| --- | --- | --- |
+| Modular Java control plane | Implemented and tested | Identity, employee configuration, tasks, billing, knowledge, memory, context, models, interaction, and integration modules |
+| Versioned API and event contracts | Implemented | Public and internal OpenAPI plus AsyncAPI contracts and fixtures |
+| React application surfaces | Working prototype, API migration in progress | API mode fails visibly and does not fall back to demo facts |
+| FastAPI context boundary | Implemented and tested | Health, internal authentication, indexing, retrieval, migrations, and PostgreSQL integration |
+| Long-running agent runtime | Conditional / planned | Enabled only after recovery, fencing, security, and quality gates pass |
+| Production deployment | Not supported | Independent hardening, threat modeling, observability, and operational review are still required |
+
+See [ROADMAP.md](ROADMAP.md) for the planned sequence and [CHANGELOG.md](CHANGELOG.md) for released changes.
+
+## Prerequisites
+
+- Java 21 and Maven 3.8.6+
+- Python 3.12+ and `uv`
 - Node.js 22+
-- Docker Desktop（本地 PostgreSQL/pgvector）
+- Docker Desktop for local PostgreSQL/pgvector and Redis
 
-所有密钥和密码必须通过环境变量或本地 `.env` 注入；仓库只保留 `.env.example` 占位说明。
+All credentials must come from environment variables or a local `.env`. The repository contains placeholders only.
 
-## 本地 PostgreSQL
+## Quick start
+
+Create local configuration and start PostgreSQL:
 
 ```bash
 cp deploy/local/.env.example deploy/local/.env
 docker compose --env-file deploy/local/.env -f deploy/local/compose.yaml up -d postgres
 ```
 
-示例文件中的密码必须在本机修改，不能用于共享或线上环境。
-
-本地体验账号、三位数字员工、智点账本与幂等校验见
-[`deploy/local/README.md`](deploy/local/README.md)。本地平台角色包含官方模板和模型管理权限；企业角色包含员工管理、任务与内部会话权限。
-
-## Java 主服务
-
-应用只接受环境变量中的数据库、JWT 与模型密钥。模型管理页面保存的是
-`env:DIANLIAN_MODEL_*` 引用，不保存真实 Key；`DIANLIAN_MODEL_ALLOWED_HOSTS`
-必须填写实际 Provider 域名的精确白名单。
+Build the Java bootstrap application:
 
 ```bash
-set -a
-source deploy/local/.env
-set +a
-export DIANLIAN_DB_URL="jdbc:postgresql://127.0.0.1:${DIANLIAN_POSTGRES_PORT}/$DIANLIAN_POSTGRES_DB"
-export DIANLIAN_DB_USERNAME="$DIANLIAN_POSTGRES_USER"
-export DIANLIAN_DB_PASSWORD="$DIANLIAN_POSTGRES_PASSWORD"
-env JAVA_HOME=/opt/homebrew/opt/openjdk@21 mvn -f dianlian-platform/pom.xml \
+env JAVA_HOME=/path/to/java-21 mvn -f dianlian-platform/pom.xml \
   -pl dianlian-bootstrap -am -DskipTests package
-env JAVA_HOME=/opt/homebrew/opt/openjdk@21 java \
-  -jar dianlian-platform/dianlian-bootstrap/target/dianlian-bootstrap-0.1.0-SNAPSHOT.jar \
-  --spring.profiles.active=local
 ```
 
-模型定义和默认路由配置完成后，再在本地 `.env` 中显式开启对应 Worker：
-
-```dotenv
-DIANLIAN_INTERACTION_WORKER_ENABLED=true
-DIANLIAN_TASK_WORKER_ENABLED=true
-```
-
-对话 Worker 处理真人触发的数字员工回复；任务 Worker 当前只执行明确标记为
-`MODEL` 的步骤。未接入的 `TOOL / RETRIEVAL / RULE_ENGINE` 步骤会安全停在等待状态，不会伪造完成。
-
-## Web API 模式
+Run the web application in API mode:
 
 ```bash
 cd dianlian-web
-env VITE_DATA_SOURCE=api \
-  DIANLIAN_DEV_API_TARGET=http://127.0.0.1:8080 \
-  npm run dev
+npm ci
+env VITE_DATA_SOURCE=api DIANLIAN_DEV_API_TARGET=http://127.0.0.1:8080 npm run dev
 ```
 
-API 模式失败时不会回退演示数据。员工端、企业管理中心与平台运营中心使用彼此独立的信息架构。
-
-## Python Runtime
+Run the Python boundary:
 
 ```bash
 cd dianlian-ai-runtime
-uv sync --dev
+uv sync --frozen
 uv run uvicorn dianlian_runtime.app:create_app --factory --host 127.0.0.1 --port 8091
 ```
 
-健康检查：
+Local seed data and verification steps are documented in [`deploy/local/README.md`](deploy/local/README.md).
+
+## Validation
+
+The CI workflow runs the same three stack-level checks:
 
 ```bash
-curl -s http://127.0.0.1:8091/internal/v1/health/liveness
-curl -s http://127.0.0.1:8091/internal/v1/health/readiness
-curl -s http://127.0.0.1:8091/internal/v1/runtime/status
+env JAVA_HOME=/path/to/java-21 mvn -f dianlian-platform/pom.xml test
+
+cd dianlian-web
+npm ci
+npm test
+npm run build
+npm run test:sites
+
+cd ../dianlian-ai-runtime
+uv sync --frozen
+uv run pytest
 ```
 
-## 开源协作
+## Security model
 
-- 提交改动前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。
-- 安全问题请按 [SECURITY.md](SECURITY.md) 私下报告，不要直接公开利用细节。
-- 当前版本按 [MIT License](LICENSE) 开源。
+The architecture treats model output, retrieval results, runtime events, and remote side effects as untrusted inputs. Important invariants include:
+
+- authorization and tenant boundaries are rechecked by the business control plane;
+- model credentials are referenced from the environment and are never stored as plaintext definitions;
+- runtime and context integrations are disabled unless explicitly configured;
+- task, billing, and side-effect operations use explicit idempotency and fencing boundaries;
+- knowledge and memory retrieval is scoped before context assembly;
+- failures remain visible instead of being converted into synthetic success.
+
+Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
+
+## Contributing
+
+Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a change. General questions belong in [GitHub Discussions or Issues](SUPPORT.md), while security reports must use the private advisory flow.
+
+This project is available under the [MIT License](LICENSE).

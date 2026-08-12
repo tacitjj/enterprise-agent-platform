@@ -1,17 +1,30 @@
+**English** | [简体中文](SECURITY.zh-CN.md)
+
 # Security Policy
 
 ## Supported versions
 
-项目仍处于早期开发阶段，尚无受支持的生产版本或安全修复时限承诺。
+The project is an early reference implementation. It does not yet publish a production-supported version or a guaranteed security-fix service level.
 
 ## Reporting a vulnerability
 
-请使用 GitHub 仓库的 **Security → Report a vulnerability** 私下报告安全问题：
+Use GitHub's private vulnerability reporting flow:
 
 https://github.com/tacitjj/enterprise-agent-platform/security/advisories/new
 
-请包含受影响范围、复现条件、潜在影响和建议修复方向。不要在公开 Issue 中披露未修复漏洞、凭据或真实数据。
+Include the affected boundary, reproduction conditions, potential impact, and a suggested remediation direction when possible. Do not disclose unpatched vulnerabilities, credentials, exploit details, or real data in a public issue.
 
 ## Deployment notice
 
-当前代码仅用于本地研究和架构验证。公开部署前，使用者必须自行完成威胁建模、身份与租户隔离审计、网络出口控制、速率限制、密钥管理和依赖审查。
+The current code is intended for local research and architecture validation. Before any public or production deployment, operators must perform their own threat model and review at least:
+
+- identity, authorization, and tenant isolation;
+- model and tool endpoint allowlists;
+- network egress and sandbox policy;
+- request, payload, and rate limits;
+- secret and key lifecycle management;
+- dependency and container provenance;
+- audit logging, monitoring, backup, and recovery;
+- remote side-effect idempotency and reconciliation.
+
+Security-sensitive defaults should fail closed. A green test suite is not a production security certification.
