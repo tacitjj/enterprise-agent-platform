@@ -1,0 +1,20 @@
+sa-token:
+  is-print: false
+
+dianlian:
+  context-index-worker:
+    allow-loopback-http: true
+  context-retrieval-client:
+    allow-loopback-http: true
+  authentication:
+    refresh-cookie-name: DIANLIAN-REFRESH
+    refresh-cookie-secure: false
+
+mybatis-plus:
+  configuration:
+    log-impl: org.apache.ibatis.logging.slf4j.Slf4jImpl
+
+logging:
+  level:
+    com.dianlian.platform.model.infrastructure.mapper: DEBUG
+    com.dianlian.platform.interaction.infrastructure.mapper: DEBUG

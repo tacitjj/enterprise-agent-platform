@@ -1,0 +1,29 @@
+.DS_Store
+.idea/
+.vscode/
+.playwright-cli/
+
+# Local configuration and secrets
+.env
+.env.local
+!.env.example
+
+# Java
+**/target/
+/build/
+*.log
+
+# Python
+**/.venv/
+**/__pycache__/
+**/.pytest_cache/
+**/.ruff_cache/
+*.py[cod]
+
+# Frontend build and local QA output
+**/node_modules/
+**/dist/
+**/.qa/
+
+# Local runtime state
+.local/

@@ -1,0 +1,53 @@
+.api-boundary {
+  min-height: calc(100vh - 66px);
+  display: grid;
+  place-items: center;
+  padding: 40px 20px;
+  background: radial-gradient(circle at 50% 25%, #e7f2ff 0, #f3f7fc 42%, #f3f7fc 100%);
+}
+
+.api-boundary > section {
+  width: min(520px, 100%);
+  display: grid;
+  justify-items: center;
+  gap: 12px;
+  padding: 42px;
+  border: 1px solid var(--border);
+  border-radius: 24px;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: var(--shadow-sm);
+  text-align: center;
+}
+
+.api-boundary__mark {
+  width: 52px;
+  height: 52px;
+  display: grid;
+  place-items: center;
+  border-radius: 17px;
+  background: var(--brand-primary);
+  color: white;
+  font-size: 20px;
+  font-weight: 800;
+}
+
+.api-boundary h1 { margin: 8px 0 0; font-size: 25px; }
+.api-boundary p { max-width: 420px; margin: 0; color: var(--text-secondary); line-height: 1.8; }
+.api-boundary button { min-height: 40px; margin-top: 8px; padding: 0 20px; border: 0; border-radius: 10px; background: var(--brand-primary); color: white; font-weight: 700; cursor: pointer; }
+
+.api-inline-error {
+  width: min(1400px, calc(100% - 48px));
+  margin: 16px auto -2px;
+  padding: 10px 14px;
+  border: 1px solid #f1c6c9;
+  border-radius: 10px;
+  background: #fff2f2;
+  color: var(--danger);
+  font-size: 12px;
+}
+
+.api-boundary--loading .api-boundary__mark { animation: api-boundary-pulse 1.4s ease-in-out infinite; }
+
+@keyframes api-boundary-pulse {
+  50% { transform: scale(0.92); opacity: 0.72; }
+}

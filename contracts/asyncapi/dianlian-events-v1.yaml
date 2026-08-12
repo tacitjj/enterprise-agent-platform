@@ -1,0 +1,630 @@
+asyncapi: 3.0.0
+info:
+  title: 点联 SSE 事件契约
+  version: 1.0.0
+  description: |
+    点联 V1 办公室、内部会话和任务流共用的 SSE 信封与事件字典。
+
+    SSE 是只读、至少一次投递的通知通道，不承担业务命令，也不承诺恰好一次。
+    写操作只能通过带幂等契约的 REST API 完成。客户端必须在 `streamType + streamId`
+    范围内按 `eventId` 幂等消费。
+  x-contract-status: frozen-for-m0-m1
+  x-contract-version: 1.0.0
+defaultContentType: application/json
+
+channels:
+  officeEvents:
+    address: /api/v1/office/events
+    description: 当前用户在当前租户中的办公室事件流。
+    messages:
+      dianlianSseEvent:
+        $ref: "#/components/messages/DianlianSseEvent"
+    x-stream-type: OFFICE_USER
+  conversationEvents:
+    address: /api/v1/conversations/{conversationId}/events
+    description: 当前有效会话成员可见的内部会话事件流；每次建连、重连和下发均重新鉴权。
+    parameters:
+      conversationId:
+        $ref: "#/components/parameters/conversationId"
+    messages:
+      dianlianSseEvent:
+        $ref: "#/components/messages/DianlianSseEvent"
+    x-stream-type: CONVERSATION
+  taskEvents:
+    address: /api/v1/tasks/{taskId}/events
+    description: 当前用户对指定任务可见的任务、步骤、成果、审批和费用摘要事件流。
+    parameters:
+      taskId:
+        $ref: "#/components/parameters/taskId"
+    messages:
+      dianlianSseEvent:
+        $ref: "#/components/messages/DianlianSseEvent"
+    x-stream-type: TASK
+
+operations:
+  receiveOfficeEvents:
+    action: receive
+    channel:
+      $ref: "#/channels/officeEvents"
+    messages:
+      - $ref: "#/channels/officeEvents/messages/dianlianSseEvent"
+  receiveConversationEvents:
+    action: receive
+    channel:
+      $ref: "#/channels/conversationEvents"
+    messages:
+      - $ref: "#/channels/conversationEvents/messages/dianlianSseEvent"
+  receiveTaskEvents:
+    action: receive
+    channel:
+      $ref: "#/channels/taskEvents"
+    messages:
+      - $ref: "#/channels/taskEvents/messages/dianlianSseEvent"
+
+components:
+  parameters:
+    conversationId:
+      description: 当前租户内稳定会话 ID。
+      location: $message.payload#/streamId
+    taskId:
+      description: 当前租户内稳定任务 ID。
+      location: $message.payload#/streamId
+
+  messages:
+    DianlianSseEvent:
+      name: DianlianSseEvent
+      title: 点联统一 SSE 事件
+      summary: 所有流共用同一信封，eventType 决定受控 payload。
+      contentType: application/json
+      payload:
+        $ref: "#/components/schemas/SseEventEnvelope"
+      x-sse-wire-format:
+        id: eventId
+        event: eventType
+        data: full-envelope-json
+      x-security-policy: 只传业务轨迹白名单，不传模型思维链、系统提示词、密钥、原始鉴权头或无权正文。
+
+  schemas:
+    StableId:
+      type: string
+      minLength: 1
+      maxLength: 128
+      pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    EventId:
+      $ref: "#/components/schemas/StableId"
+    Instant:
+      type: string
+      format: date-time
+    SseEventEnvelope:
+      type: object
+      additionalProperties: false
+      required:
+        - schemaVersion
+        - eventId
+        - streamType
+        - streamId
+        - eventType
+        - aggregateType
+        - aggregateId
+        - aggregateVersion
+        - occurredAt
+        - visibilityVersion
+        - traceId
+        - payload
+      properties:
+        schemaVersion:
+          type: integer
+          const: 1
+        eventId:
+          $ref: "#/components/schemas/EventId"
+        streamType:
+          type: string
+          enum: [OFFICE_USER, CONVERSATION, TASK]
+        streamId:
+          $ref: "#/components/schemas/StableId"
+        eventType:
+          $ref: "#/components/schemas/EventType"
+        aggregateType:
+          type: string
+          enum: [OFFICE, CONVERSATION, TASK, TASK_STEP, ARTIFACT, APPROVAL, DELIVERY, POINT_ACCOUNT, AGENT_INVOCATION, STREAM]
+        aggregateId:
+          $ref: "#/components/schemas/StableId"
+        aggregateVersion:
+          type: integer
+          minimum: 0
+        occurredAt:
+          $ref: "#/components/schemas/Instant"
+        visibilityVersion:
+          type: string
+          minLength: 1
+          maxLength: 128
+        traceId:
+          type: string
+          minLength: 1
+          maxLength: 128
+        payload:
+          oneOf:
+            - $ref: "#/components/schemas/TaskSnapshotInvalidatedPayload"
+            - $ref: "#/components/schemas/TaskLifecyclePayload"
+            - $ref: "#/components/schemas/PlanChangedPayload"
+            - $ref: "#/components/schemas/TaskProgressPayload"
+            - $ref: "#/components/schemas/AssistantDeltaPayload"
+            - $ref: "#/components/schemas/GuidancePayload"
+            - $ref: "#/components/schemas/ToolPayload"
+            - $ref: "#/components/schemas/CheckpointPayload"
+            - $ref: "#/components/schemas/ArtifactPayload"
+            - $ref: "#/components/schemas/ApprovalPayload"
+            - $ref: "#/components/schemas/DeliveryPayload"
+            - $ref: "#/components/schemas/ConversationMessagePayload"
+            - $ref: "#/components/schemas/ConversationVisibilityPayload"
+            - $ref: "#/components/schemas/ConversationParticipantPayload"
+            - $ref: "#/components/schemas/ConversationAgentPayload"
+            - $ref: "#/components/schemas/ReadPositionPayload"
+            - $ref: "#/components/schemas/AgentInvocationPayload"
+            - $ref: "#/components/schemas/OfficeInvalidatedPayload"
+            - $ref: "#/components/schemas/PointAccountInvalidatedPayload"
+            - $ref: "#/components/schemas/StreamResetPayload"
+    EventType:
+      type: string
+      enum:
+        - task.snapshot.invalidated
+        - task.started
+        - task.plan.created
+        - task.plan.revised
+        - task.progress
+        - assistant.delta
+        - guidance.accepted
+        - guidance.applied
+        - tool.started
+        - tool.completed
+        - checkpoint.required
+        - checkpoint.resolved
+        - task.paused
+        - task.resumed
+        - task.completed
+        - task.failed
+        - task.cancelled
+        - artifact.ready
+        - artifact.stale
+        - approval.updated
+        - delivery.updated
+        - conversation.message.created
+        - conversation.message.visibility.changed
+        - conversation.participant.added
+        - conversation.participant.removed
+        - conversation.agent.added
+        - conversation.agent.removed
+        - conversation.read-position.updated
+        - agent.invocation.started
+        - agent.invocation.failed
+        - point.account.invalidated
+        - office.snapshot.invalidated
+        - stream.reset_required
+
+    TaskSnapshotInvalidatedPayload:
+      type: object
+      additionalProperties: false
+      required: [taskId, reason]
+      properties:
+        taskId:
+          $ref: "#/components/schemas/StableId"
+        reason:
+          type: string
+          const: TASK_CHANGED
+    TaskLifecyclePayload:
+      type: object
+      additionalProperties: false
+      required: [taskId, taskStatus, allowedActions]
+      properties:
+        taskId:
+          $ref: "#/components/schemas/StableId"
+        taskStatus:
+          $ref: "#/components/schemas/TaskStatus"
+        blockerCode:
+          type: [string, "null"]
+          maxLength: 64
+        failureCode:
+          type: [string, "null"]
+          maxLength: 128
+        allowedActions:
+          $ref: "#/components/schemas/AllowedActions"
+    PlanChangedPayload:
+      type: object
+      additionalProperties: false
+      required: [taskId, planVersion, changedStepIds, allowedActions]
+      properties:
+        taskId:
+          $ref: "#/components/schemas/StableId"
+        planVersion:
+          type: integer
+          minimum: 1
+        changedStepIds:
+          type: array
+          maxItems: 200
+          items:
+            $ref: "#/components/schemas/StableId"
+        staleArtifactVersionIds:
+          type: array
+          maxItems: 200
+          items:
+            $ref: "#/components/schemas/StableId"
+        allowedActions:
+          $ref: "#/components/schemas/AllowedActions"
+    TaskProgressPayload:
+      type: object
+      additionalProperties: false
+      required: [taskId, stepId, stepStatus, responsibleType, responsibleId, summary, allowedActions]
+      properties:
+        taskId:
+          $ref: "#/components/schemas/StableId"
+        stepId:
+          $ref: "#/components/schemas/StableId"
+        stepStatus:
+          $ref: "#/components/schemas/TaskStepStatus"
+        responsibleType:
+          type: string
+          enum: [AGENT, USER, APPROVER, SYSTEM, EXTERNAL]
+        responsibleId:
+          $ref: "#/components/schemas/StableId"
+        summary:
+          type: string
+          minLength: 1
+          maxLength: 1000
+        evidenceRefIds:
+          type: array
+          maxItems: 50
+          items:
+            $ref: "#/components/schemas/StableId"
+        artifactVersionIds:
+          type: array
+          maxItems: 50
+          items:
+            $ref: "#/components/schemas/StableId"
+        capturedPoints:
+          $ref: "#/components/schemas/PointValue"
+        allowedActions:
+          $ref: "#/components/schemas/AllowedActions"
+    AssistantDeltaPayload:
+      type: object
+      additionalProperties: false
+      description: 高频临时流片段；可被压缩或丢弃，最终内容必须由持久消息或 Artifact 恢复。
+      required: [messageId, deltaSequence, textDelta]
+      properties:
+        messageId:
+          $ref: "#/components/schemas/StableId"
+        deltaSequence:
+          type: integer
+          minimum: 1
+        textDelta:
+          type: string
+          maxLength: 8000
+    GuidancePayload:
+      type: object
+      additionalProperties: false
+      required: [taskId, guidanceId, guidanceType, applyMode, currentPlanVersion]
+      properties:
+        taskId:
+          $ref: "#/components/schemas/StableId"
+        guidanceId:
+          $ref: "#/components/schemas/StableId"
+        guidanceType:
+          type: string
+          enum: [ADD_CONTEXT, CORRECT_FACT, CHANGE_CONSTRAINT, CHANGE_GOAL, STYLE_GUIDANCE, ANSWER_CHECKPOINT, APPROVE, REJECT, PAUSE, RESUME, CANCEL, RETRY_FROM_STEP]
+        applyMode:
+          type: string
+          enum: [APPLIED, PREVIEW_REQUIRED, QUEUED_AT_SAFE_POINT]
+        currentPlanVersion:
+          type: integer
+          minimum: 1
+        proposedPlanVersion:
+          type: [integer, "null"]
+          minimum: 1
+    ToolPayload:
+      type: object
+      additionalProperties: false
+      description: 仅展示工具业务名称、目标、结果摘要和副作用状态，不展示密钥或原始敏感请求体。
+      required: [taskId, stepId, toolName, effectIntentId, toolStatus, resultSummary]
+      properties:
+        taskId:
+          $ref: "#/components/schemas/StableId"
+        stepId:
+          $ref: "#/components/schemas/StableId"
+        toolName:
+          type: string
+          minLength: 1
+          maxLength: 100
+        effectIntentId:
+          $ref: "#/components/schemas/StableId"
+        toolStatus:
+          type: string
+          enum: [PREPARED, EXECUTING, SUCCEEDED, FAILED, OUTCOME_UNKNOWN]
+        resultSummary:
+          type: string
+          minLength: 1
+          maxLength: 1000
+    CheckpointPayload:
+      type: object
+      additionalProperties: false
+      required: [taskId, checkpointId, checkpointType, status, prompt, allowedActions]
+      properties:
+        taskId:
+          $ref: "#/components/schemas/StableId"
+        checkpointId:
+          $ref: "#/components/schemas/StableId"
+        checkpointType:
+          type: string
+          enum: [USER_INPUT, CONFIRMATION, APPROVAL, AUTHORIZATION, QUOTA]
+        status:
+          type: string
+          enum: [OPEN, RESOLVED, CANCELLED, EXPIRED]
+        prompt:
+          type: string
+          minLength: 1
+          maxLength: 1000
+        allowedActions:
+          $ref: "#/components/schemas/AllowedActions"
+    ArtifactPayload:
+      type: object
+      additionalProperties: false
+      required: [taskId, artifactVersionId, artifactType, artifactStatus, contentHash]
+      properties:
+        taskId:
+          $ref: "#/components/schemas/StableId"
+        artifactVersionId:
+          $ref: "#/components/schemas/StableId"
+        artifactType:
+          type: string
+          minLength: 1
+          maxLength: 64
+        artifactStatus:
+          type: string
+          enum: [DRAFT, READY, STALE]
+        contentHash:
+          type: string
+          minLength: 16
+          maxLength: 128
+        parentArtifactVersionId:
+          type: [string, "null"]
+          maxLength: 128
+    ApprovalPayload:
+      type: object
+      additionalProperties: false
+      required: [approvalId, artifactVersionId, approvalStatus, allowedActions]
+      properties:
+        approvalId:
+          $ref: "#/components/schemas/StableId"
+        artifactVersionId:
+          $ref: "#/components/schemas/StableId"
+        approvalStatus:
+          type: string
+          enum: [PENDING, APPROVED, REJECTED, WITHDRAWN, INVALIDATED]
+        allowedActions:
+          $ref: "#/components/schemas/AllowedActions"
+    DeliveryPayload:
+      type: object
+      additionalProperties: false
+      required: [deliveryId, artifactVersionId, deliveryStatus, destinationType, allowedActions]
+      properties:
+        deliveryId:
+          $ref: "#/components/schemas/StableId"
+        artifactVersionId:
+          $ref: "#/components/schemas/StableId"
+        deliveryStatus:
+          type: string
+          enum: [PENDING, SENDING, ACCEPTED, DELIVERED, RETRY_WAIT, FAILED, CANCELLED, UNKNOWN]
+        destinationType:
+          type: string
+          minLength: 1
+          maxLength: 64
+        reasonCode:
+          type: [string, "null"]
+          maxLength: 64
+        allowedActions:
+          $ref: "#/components/schemas/AllowedActions"
+    ConversationMessagePayload:
+      type: object
+      additionalProperties: false
+      required: [conversationId, messageId, sequenceNo, senderType, senderId, createdAt]
+      properties:
+        conversationId:
+          $ref: "#/components/schemas/StableId"
+        messageId:
+          $ref: "#/components/schemas/StableId"
+        sequenceNo:
+          type: integer
+          minimum: 1
+          description: 会话消息顺序，不等于 SSE eventId。
+        senderType:
+          type: string
+          enum: [USER, AGENT, SYSTEM]
+        senderId:
+          $ref: "#/components/schemas/StableId"
+        textPreview:
+          type: [string, "null"]
+          maxLength: 300
+        createdAt:
+          $ref: "#/components/schemas/Instant"
+    ConversationVisibilityPayload:
+      type: object
+      additionalProperties: false
+      required: [conversationId, messageId, visibilityStatus]
+      properties:
+        conversationId:
+          $ref: "#/components/schemas/StableId"
+        messageId:
+          $ref: "#/components/schemas/StableId"
+        visibilityStatus:
+          type: string
+          enum: [VISIBLE, RETRACTED, DELETED]
+    ConversationParticipantPayload:
+      type: object
+      additionalProperties: false
+      required: [conversationId, participantId, participantStatus, membershipVersion]
+      properties:
+        conversationId:
+          $ref: "#/components/schemas/StableId"
+        participantId:
+          $ref: "#/components/schemas/StableId"
+        participantStatus:
+          type: string
+          enum: [ACTIVE, LEFT, REMOVED]
+        membershipVersion:
+          type: string
+          minLength: 1
+          maxLength: 128
+    ConversationAgentPayload:
+      type: object
+      additionalProperties: false
+      required: [conversationId, agentId, bindingStatus, bindingVersion]
+      properties:
+        conversationId:
+          $ref: "#/components/schemas/StableId"
+        agentId:
+          $ref: "#/components/schemas/StableId"
+        bindingStatus:
+          type: string
+          enum: [ACTIVE, REMOVED]
+        bindingVersion:
+          type: string
+          minLength: 1
+          maxLength: 128
+    ReadPositionPayload:
+      type: object
+      additionalProperties: false
+      required: [conversationId, userId, upToSequenceNo]
+      properties:
+        conversationId:
+          $ref: "#/components/schemas/StableId"
+        userId:
+          $ref: "#/components/schemas/StableId"
+        upToSequenceNo:
+          type: integer
+          minimum: 0
+    AgentInvocationPayload:
+      type: object
+      additionalProperties: false
+      required: [logicalInvocationId, messageTargetId, agentId, invocationStatus]
+      properties:
+        logicalInvocationId:
+          $ref: "#/components/schemas/StableId"
+        messageTargetId:
+          $ref: "#/components/schemas/StableId"
+        agentId:
+          $ref: "#/components/schemas/StableId"
+        invocationStatus:
+          type: string
+          enum: [STARTED, FAILED]
+        failureCode:
+          type: [string, "null"]
+          maxLength: 128
+    OfficeInvalidatedPayload:
+      type: object
+      additionalProperties: false
+      required: [reason, latestKnownSnapshotVersion]
+      properties:
+        reason:
+          type: string
+          enum: [AGENT_CHANGED, CONVERSATION_CHANGED, TASK_CHANGED, ARTIFACT_CHANGED, APPROVAL_CHANGED, PERMISSION_CHANGED]
+        latestKnownSnapshotVersion:
+          type: string
+          minLength: 1
+          maxLength: 128
+    PointAccountInvalidatedPayload:
+      type: object
+      additionalProperties: false
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          enum: [RESERVATION_CHANGED, CAPTURE_CHANGED, RELEASE_CHANGED, RETURN_CHANGED, ACCOUNT_STATUS_CHANGED]
+        taskId:
+          type: [string, "null"]
+          maxLength: 128
+    StreamResetPayload:
+      type: object
+      additionalProperties: false
+      required: [reason, recoveryResource]
+      properties:
+        reason:
+          type: string
+          enum: [CURSOR_EXPIRED, REPLAY_GAP, VISIBILITY_CHANGED, PERMISSION_CHANGED, STREAM_COMPACTED]
+        recoveryResource:
+          type: string
+          format: uri-reference
+          description: 客户端必须重新读取的 OfficeSnapshot、会话恢复页或 TaskSnapshot 地址。
+        message:
+          type: string
+          minLength: 1
+          maxLength: 500
+
+    TaskStatus:
+      type: string
+      enum: [DRAFT, PLANNING, WAITING_USER, QUEUED, RUNNING, APPLYING_GUIDANCE, REPLANNING, WAITING_CONFIRMATION, WAITING_APPROVAL, PAUSED, SUCCEEDED, PARTIAL_SUCCESS, FAILED, CANCELLED]
+    TaskStepStatus:
+      type: string
+      enum: [PENDING, READY, RUNNING, WAITING_EXTERNAL, RETRY_WAIT, SUCCEEDED, FAILED_FINAL, SKIPPED, CANCELLED, BLOCKED_SIDE_EFFECT_RECONCILIATION]
+    PointValue:
+      type: string
+      pattern: "^(0|[1-9][0-9]*)(\\.[0-9]{1,6})?$"
+    AllowedActions:
+      type: array
+      uniqueItems: true
+      maxItems: 50
+      items:
+        type: string
+        enum: [VIEW, ADD_CONTEXT, CORRECT_FACT, CHANGE_CONSTRAINT, CHANGE_GOAL, STYLE_GUIDANCE, ANSWER_CHECKPOINT, PAUSE, RESUME, CANCEL, RETRY_FROM_STEP, SELECT_ARTIFACT, SUBMIT_APPROVAL, APPROVE, REJECT, DOWNLOAD]
+
+x-sse-contract:
+  transport: HTTP GET text/event-stream
+  deliverySemantics: AT_LEAST_ONCE
+  commandChannel: NONE
+  cursorScope: streamType + streamId
+  reconnectHeaders:
+    - Last-Event-ID
+  reconnectQueryAlternative:
+    - afterEventId
+  resetEvent: stream.reset_required
+  snapshotHighWatermarkField: resumeEventId
+  rules:
+    - "`eventId` 只在所属流内有序，不能与消息 sequenceNo、计划版本或 Runtime sequenceNo 混用。"
+    - "TASK 流事件只通知客户端刷新；任务状态、步骤、成果和费用必须重新读取 TaskSnapshot。"
+    - "持久事件必须先提交事件日志再广播；assistant.delta 可使用有界缓冲，但最终消息或成果必须可恢复。"
+    - "游标过期、不可修复缺口或权限版本变化时发送 reset，客户端不得从本地缓存猜测权威状态。"
+    - "快照读取与事件高水位来自同一一致性视图；订阅从 resumeEventId 之后开始。"
+    - "慢消费者超过有界队列后主动断开并要求重建，禁止无限占用服务端内存。"
+    - "每次连接、重连和事件下发均重新鉴权；撤权后停止正文投递并关闭对应流。"
+
+x-event-dictionary:
+  task.snapshot.invalidated: { streams: [TASK], payload: TaskSnapshotInvalidatedPayload, durability: PERSISTED }
+  task.started: { streams: [TASK, OFFICE_USER], payload: TaskLifecyclePayload, durability: PERSISTED }
+  task.plan.created: { streams: [TASK], payload: PlanChangedPayload, durability: PERSISTED }
+  task.plan.revised: { streams: [TASK], payload: PlanChangedPayload, durability: PERSISTED }
+  task.progress: { streams: [TASK], payload: TaskProgressPayload, durability: PERSISTED_OR_SNAPSHOTTED }
+  assistant.delta: { streams: [TASK, CONVERSATION], payload: AssistantDeltaPayload, durability: EPHEMERAL }
+  guidance.accepted: { streams: [TASK], payload: GuidancePayload, durability: PERSISTED }
+  guidance.applied: { streams: [TASK], payload: GuidancePayload, durability: PERSISTED }
+  tool.started: { streams: [TASK], payload: ToolPayload, durability: PERSISTED }
+  tool.completed: { streams: [TASK], payload: ToolPayload, durability: PERSISTED }
+  checkpoint.required: { streams: [TASK], payload: CheckpointPayload, durability: PERSISTED }
+  checkpoint.resolved: { streams: [TASK], payload: CheckpointPayload, durability: PERSISTED }
+  task.paused: { streams: [TASK, OFFICE_USER], payload: TaskLifecyclePayload, durability: PERSISTED }
+  task.resumed: { streams: [TASK, OFFICE_USER], payload: TaskLifecyclePayload, durability: PERSISTED }
+  task.completed: { streams: [TASK, OFFICE_USER], payload: TaskLifecyclePayload, durability: PERSISTED }
+  task.failed: { streams: [TASK, OFFICE_USER], payload: TaskLifecyclePayload, durability: PERSISTED }
+  task.cancelled: { streams: [TASK, OFFICE_USER], payload: TaskLifecyclePayload, durability: PERSISTED }
+  artifact.ready: { streams: [TASK, OFFICE_USER], payload: ArtifactPayload, durability: PERSISTED }
+  artifact.stale: { streams: [TASK, OFFICE_USER], payload: ArtifactPayload, durability: PERSISTED }
+  approval.updated: { streams: [TASK, OFFICE_USER], payload: ApprovalPayload, durability: PERSISTED }
+  delivery.updated: { streams: [TASK, OFFICE_USER], payload: DeliveryPayload, durability: PERSISTED }
+  conversation.message.created: { streams: [CONVERSATION], payload: ConversationMessagePayload, durability: PERSISTED }
+  conversation.message.visibility.changed: { streams: [CONVERSATION], payload: ConversationVisibilityPayload, durability: PERSISTED }
+  conversation.participant.added: { streams: [CONVERSATION, OFFICE_USER], payload: ConversationParticipantPayload, durability: PERSISTED }
+  conversation.participant.removed: { streams: [CONVERSATION, OFFICE_USER], payload: ConversationParticipantPayload, durability: PERSISTED }
+  conversation.agent.added: { streams: [CONVERSATION, OFFICE_USER], payload: ConversationAgentPayload, durability: PERSISTED }
+  conversation.agent.removed: { streams: [CONVERSATION, OFFICE_USER], payload: ConversationAgentPayload, durability: PERSISTED }
+  conversation.read-position.updated: { streams: [CONVERSATION], payload: ReadPositionPayload, durability: PERSISTED }
+  agent.invocation.started: { streams: [CONVERSATION, TASK], payload: AgentInvocationPayload, durability: PERSISTED }
+  agent.invocation.failed: { streams: [CONVERSATION, TASK], payload: AgentInvocationPayload, durability: PERSISTED }
+  point.account.invalidated: { streams: [TASK, OFFICE_USER], payload: PointAccountInvalidatedPayload, durability: PERSISTED }
+  office.snapshot.invalidated: { streams: [OFFICE_USER], payload: OfficeInvalidatedPayload, durability: PERSISTED }
+  stream.reset_required: { streams: [OFFICE_USER, CONVERSATION, TASK], payload: StreamResetPayload, durability: CONTROL }

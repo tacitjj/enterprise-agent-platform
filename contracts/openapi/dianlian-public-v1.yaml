@@ -1,0 +1,3147 @@
+openapi: 3.1.0
+jsonSchemaDialect: https://json-schema.org/draft/2020-12/schema
+info:
+  title: 点联公共 API
+  version: 1.9.0
+  description: |
+    点联企业数字办公大厅 V1 的首批公共契约。该文件冻结会话、办公室、任务创建、
+    任务快照与任务 SSE 的字段和并发语义，不代表全部 V1 API 已开放。
+
+    企业资源均在服务端登录态解析出的当前租户中访问；平台资源要求无活动租户的 PLATFORM
+    会话。客户端不得通过请求体或查询参数声明 tenantId、角色、部门、知识范围或预算归属。
+  x-contract-status: frozen-for-m0-m1
+x-contract-version: 1.9.0
+servers:
+  - url: /
+    description: 当前点联部署
+tags:
+  - name: Authentication
+  - name: Session
+  - name: Office
+  - name: Employees
+  - name: Employee Management
+  - name: Model Management
+  - name: Conversations
+  - name: Tasks
+security:
+  - bearerAuth: []
+
+paths:
+  /api/v1/auth/login:
+    post:
+      tags: [Authentication]
+      operationId: loginWithPassword
+      summary: 使用账号密码建立多端会话
+      security: []
+      description: |
+        Web、App、小程序和桌面端共用同一登录命令、账号体系与设备会话。成功后统一签发短期
+        Bearer JWT。Web 的单次 Refresh Token 只通过 HttpOnly Cookie 交付；其他客户端通过
+        响应体接收并保存到操作系统安全存储。不得保存到 localStorage 或普通明文文件。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PasswordLoginRequest"
+      responses:
+        "200":
+          description: 登录成功
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenResponse"
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/InvalidCredentials"
+
+  /api/v1/auth/refresh:
+    post:
+      tags: [Authentication]
+      operationId: refreshAccessToken
+      summary: 单次轮换 Refresh Token 并签发新的 Access Token
+      security: []
+      description: |
+        Refresh Token 每次成功使用后立即失效并生成替代 Token。重复使用已经消费的 Token
+        会撤销所属设备会话。Web 从 HttpOnly Cookie 读取；其他客户端通过请求体提交。
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RefreshTokenRequest"
+      responses:
+        "200":
+          description: 刷新成功
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenResponse"
+        "401":
+          $ref: "#/components/responses/RefreshTokenInvalid"
+
+  /api/v1/auth/logout:
+    post:
+      tags: [Authentication]
+      operationId: logoutCurrentDevice
+      summary: 撤销当前设备会话
+      responses:
+        "204":
+          description: 当前设备会话及其 Refresh Token 已撤销
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+        "401":
+          $ref: "#/components/responses/AuthenticationRequired"
+
+  /api/v1/session:
+    get:
+      tags: [Session]
+      operationId: getCurrentSession
+      summary: 获取当前登录会话与租户权限摘要
+      description: |
+        返回服务端解析出的当前用户、当前租户、角色授予、稳定权限码和权限版本。
+        响应不得包含访问令牌、Provider 密钥或租户无权正文，并固定使用 `Cache-Control: no-store`。
+      responses:
+        "200":
+          description: 当前会话
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+            X-Trace-Id:
+              $ref: "#/components/headers/TraceId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionView"
+        "401":
+          $ref: "#/components/responses/AuthenticationRequired"
+        "403":
+          $ref: "#/components/responses/TenantAccessDenied"
+
+  /api/v1/office:
+    get:
+      tags: [Office]
+      operationId: getOfficeSnapshot
+      summary: 获取当前用户的办公室快照
+      description: |
+        `OfficeSnapshot` 是经过鉴权的可重建读模型，不是任务、审批、成果或员工状态真相。
+        ETag 绑定当前用户、当前租户、权限版本与快照版本。摘要集合有界，不返回历史消息、
+        任务步骤正文、成果正文或附件。
+      parameters:
+        - $ref: "#/components/parameters/IfNoneMatch"
+      responses:
+        "200":
+          description: 最新办公室快照
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+            Cache-Control:
+              $ref: "#/components/headers/PrivateRevalidate"
+            X-Trace-Id:
+              $ref: "#/components/headers/TraceId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OfficeSnapshot"
+        "304":
+          description: ETag 未变化；不返回响应体
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+            Cache-Control:
+              $ref: "#/components/headers/PrivateRevalidate"
+        "401":
+          $ref: "#/components/responses/AuthenticationRequired"
+        "403":
+          $ref: "#/components/responses/TenantAccessDenied"
+
+  /api/v1/employees/{agentId}:
+    get:
+      tags: [Employees]
+      operationId: getEmployeeWorkspace
+      summary: 获取已选数字员工的工作空间契约
+      description: |
+        用户从办公室明确选择一位数字员工后加载。返回企业已招聘版本冻结的输入 Schema、
+        执行模板和智点预估；不返回系统提示词、模型密钥、内部工具参数或无权知识正文。
+        OfficeSnapshot 只保留轻摘要，禁止把完整 JSON Schema 和执行模板复制进办公室快照。
+      parameters:
+        - name: agentId
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/StableId"
+        - $ref: "#/components/parameters/IfNoneMatch"
+      responses:
+        "200":
+          description: 当前企业员工工作空间契约
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+            Cache-Control:
+              $ref: "#/components/headers/PrivateRevalidate"
+            X-Trace-Id:
+              $ref: "#/components/headers/TraceId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EmployeeWorkspaceView"
+        "304":
+          description: ETag 未变化；不返回响应体
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+            Cache-Control:
+              $ref: "#/components/headers/PrivateRevalidate"
+        "401":
+          $ref: "#/components/responses/AuthenticationRequired"
+        "403":
+          $ref: "#/components/responses/TenantAccessDenied"
+        "404":
+          $ref: "#/components/responses/ResourceNotDiscoverable"
+
+  /api/v1/platform/agent-versions:
+    get:
+      tags: [Employee Management]
+      operationId: listPlatformAgentVersions
+      summary: 查询平台已发布的员工模板版本
+      description: 需要 platform.employee.template.read；仅返回版本化模板契约，不返回企业配置、企业正文、提示词或模型密钥。
+      responses:
+        "200":
+          description: 平台已发布模板版本
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentVersionListResponse"
+        "401":
+          $ref: "#/components/responses/AuthenticationRequired"
+        "403":
+          $ref: "#/components/responses/SecurityRequestRejected"
+    post:
+      tags: [Employee Management]
+      operationId: publishPlatformAgentVersion
+      summary: 发布不可变员工模板版本
+      description: 需要无活动租户的 PLATFORM 会话及 platform.employee.template.publish 权限。
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PublishAgentVersionRequest"
+      responses:
+        "201":
+          description: 新版本已发布
+          headers:
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentVersionView"
+        "200":
+          description: 同一幂等意图的第一次发布结果
+          headers:
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentVersionView"
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/AuthenticationRequired"
+        "403":
+          $ref: "#/components/responses/SecurityRequestRejected"
+        "409":
+          $ref: "#/components/responses/CommandConflict"
+
+  /api/v1/enterprise/agent-catalog:
+    get:
+      tags: [Employee Management]
+      operationId: listRecruitableAgentVersions
+      summary: 查询当前企业可招聘的员工模板版本
+      description: 服务端按当前租户和模板可见范围过滤；客户端不得传入 tenantId。
+      responses:
+        "200":
+          description: 当前企业可招聘模板版本
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentVersionListResponse"
+        "401":
+          $ref: "#/components/responses/AuthenticationRequired"
+        "403":
+          $ref: "#/components/responses/TenantAccessDenied"
+
+  /api/v1/enterprise/agents:
+    get:
+      tags: [Employee Management]
+      operationId: listEnterpriseAgents
+      summary: 查询当前企业已招聘数字员工
+      responses:
+        "200":
+          description: 当前企业员工实例
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnterpriseAgentListResponse"
+        "401":
+          $ref: "#/components/responses/AuthenticationRequired"
+        "403":
+          $ref: "#/components/responses/TenantAccessDenied"
+    post:
+      tags: [Employee Management]
+      operationId: hireEnterpriseAgent
+      summary: 从平台模板招聘当前企业数字员工
+      description: 租户、招聘人和模板可见范围全部来自服务端会话；请求不得声明 tenantId。
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HireEnterpriseAgentRequest"
+      responses:
+        "201":
+          description: 企业员工已创建
+          headers:
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnterpriseAgentView"
+        "200":
+          description: 同一幂等意图的第一次招聘结果
+          headers:
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnterpriseAgentView"
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/AuthenticationRequired"
+        "403":
+          $ref: "#/components/responses/TenantAccessDenied"
+        "404":
+          $ref: "#/components/responses/ResourceNotDiscoverable"
+        "409":
+          $ref: "#/components/responses/CommandConflict"
+
+  /api/v1/enterprise/agents/{enterpriseAgentId}:
+    get:
+      tags: [Employee Management]
+      operationId: getEnterpriseAgentDetail
+      summary: 查询当前企业数字员工配置与激活就绪状态
+      parameters:
+        - $ref: "#/components/parameters/EnterpriseAgentId"
+      responses:
+        "200":
+          description: 当前员工详情；ETag 固定为 `"ea-{stateVersion}"`
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnterpriseAgentDetailView"
+        "401":
+          $ref: "#/components/responses/AuthenticationRequired"
+        "403":
+          $ref: "#/components/responses/TenantAccessDenied"
+        "404":
+          $ref: "#/components/responses/ResourceNotDiscoverable"
+
+  /api/v1/enterprise/agents/{enterpriseAgentId}/configuration-versions:
+    post:
+      tags: [Employee Management]
+      operationId: createEnterpriseAgentConfigurationVersion
+      summary: 为草稿员工创建不可变企业配置版本
+      description: |
+        需要 enterprise.employee.configure。服务端先按幂等键重放，再校验强 If-Match；
+        同一员工的并发配置由行锁与 stateVersion CAS 串行化。V1 的三个策略字段仅允许固定值。
+      parameters:
+        - $ref: "#/components/parameters/EnterpriseAgentId"
+        - $ref: "#/components/parameters/EmployeeIfMatch"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateEnterpriseAgentConfigurationRequest"
+      responses:
+        "201":
+          description: 新配置版本已创建
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnterpriseAgentDetailView"
+        "200":
+          description: 重放同一配置意图并返回当前员工详情
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnterpriseAgentDetailView"
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/AuthenticationRequired"
+        "403":
+          $ref: "#/components/responses/TenantAccessDenied"
+        "404":
+          $ref: "#/components/responses/ResourceNotDiscoverable"
+        "409":
+          $ref: "#/components/responses/CommandConflict"
+        "412":
+          $ref: "#/components/responses/EmployeePreconditionFailed"
+        "428":
+          $ref: "#/components/responses/EmployeePreconditionRequired"
+
+  /api/v1/enterprise/agents/{enterpriseAgentId}/activate:
+    post:
+      tags: [Employee Management]
+      operationId: activateEnterpriseAgent
+      summary: 首次激活草稿数字员工
+      description: |
+        需要 enterprise.employee.activate。激活将已选 DRAFT 配置、员工 ACTIVE 状态、
+        stateVersion 与状态事件在同一事务内提交；重放优先于 If-Match 过期判断。
+      parameters:
+        - $ref: "#/components/parameters/EnterpriseAgentId"
+        - $ref: "#/components/parameters/EmployeeIfMatch"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ActivateEnterpriseAgentRequest"
+      responses:
+        "200":
+          description: 员工已激活，或重放同一激活意图
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnterpriseAgentDetailView"
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/AuthenticationRequired"
+        "403":
+          $ref: "#/components/responses/TenantAccessDenied"
+        "404":
+          $ref: "#/components/responses/ResourceNotDiscoverable"
+        "409":
+          $ref: "#/components/responses/CommandConflict"
+        "412":
+          $ref: "#/components/responses/EmployeePreconditionFailed"
+        "428":
+          $ref: "#/components/responses/EmployeePreconditionRequired"
+
+  /api/v1/platform/model-definitions:
+    get:
+      tags: [Model Management]
+      operationId: listModelDefinitions
+      summary: 查询平台模型配置版本
+      description: 仅返回模型元数据、费率和凭据引用，不返回 Provider 密钥。
+      responses:
+        "200":
+          description: 模型配置版本列表
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelDefinitionListResponse"
+        "401":
+          $ref: "#/components/responses/AuthenticationRequired"
+        "403":
+          $ref: "#/components/responses/SecurityRequestRejected"
+    post:
+      tags: [Model Management]
+      operationId: registerModelDefinition
+      summary: 登记不可变模型配置版本
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterModelDefinitionRequest"
+      responses:
+        "201":
+          description: 已创建模型配置版本
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelDefinitionView"
+        "200":
+          description: 重放同一登记意图
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelDefinitionView"
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/AuthenticationRequired"
+        "403":
+          $ref: "#/components/responses/SecurityRequestRejected"
+        "409":
+          $ref: "#/components/responses/CommandConflict"
+
+  /api/v1/platform/model-routes/{capabilityType}/default:
+    post:
+      tags: [Model Management]
+      operationId: setPlatformDefaultModelRoute
+      summary: 设置平台默认模型路由
+      parameters:
+        - $ref: "#/components/parameters/ModelCapabilityTypePath"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetModelRouteRequest"
+      responses:
+        "201":
+          description: 已创建新路由版本
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelRouteBindingView"
+        "200":
+          description: 重放同一路由意图
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelRouteBindingView"
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "403":
+          $ref: "#/components/responses/SecurityRequestRejected"
+        "409":
+          $ref: "#/components/responses/CommandConflict"
+
+  /api/v1/platform/model-routes/defaults:
+    get:
+      tags: [Model Management]
+      operationId: listPlatformDefaultModelRoutes
+      summary: 查询当前生效的平台默认模型路由
+      description: 仅返回平台级 ACTIVE 路由的最小投影，不返回模型定义、凭据引用或 Provider 密钥。
+      responses:
+        "200":
+          description: 当前生效的平台默认路由列表
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformDefaultModelRouteListResponse"
+        "401":
+          $ref: "#/components/responses/AuthenticationRequired"
+        "403":
+          $ref: "#/components/responses/SecurityRequestRejected"
+
+  /api/v1/enterprise/agents/{enterpriseAgentId}/model-routes/{capabilityType}:
+    post:
+      tags: [Model Management]
+      operationId: setEnterpriseAgentModelRoute
+      summary: 为当前企业数字员工设置模型路由
+      description: 当前企业、员工归属和操作人均来自服务端会话；跨租户员工按 404 处理。
+      parameters:
+        - $ref: "#/components/parameters/EnterpriseAgentId"
+        - $ref: "#/components/parameters/ModelCapabilityTypePath"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetModelRouteRequest"
+      responses:
+        "201":
+          description: 已创建员工模型路由版本
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelRouteBindingView"
+        "200":
+          description: 重放同一路由意图
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelRouteBindingView"
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "403":
+          $ref: "#/components/responses/TenantAccessDenied"
+        "404":
+          $ref: "#/components/responses/ResourceNotDiscoverable"
+        "409":
+          $ref: "#/components/responses/CommandConflict"
+
+  /api/v1/conversations:
+    get:
+      tags: [Conversations]
+      operationId: listConversations
+      summary: 查询当前用户可见的真人与 AI 统一会话
+      responses:
+        "200":
+          description: 会话摘要列表
+          content:
+            application/json:
+              schema:
+                type: array
+                maxItems: 200
+                items:
+                  $ref: "#/components/schemas/ConversationSummary"
+        "401":
+          $ref: "#/components/responses/AuthenticationRequired"
+        "403":
+          $ref: "#/components/responses/TenantAccessDenied"
+    post:
+      tags: [Conversations]
+      operationId: createConversation
+      summary: 创建真人直接会话、数字员工直接会话或内部群聊
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateConversationRequest"
+      responses:
+        "201":
+          description: 会话已创建
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConversationCommandResponse"
+        "200":
+          description: 重放同一创建意图
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConversationCommandResponse"
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "403":
+          $ref: "#/components/responses/TenantAccessDenied"
+        "404":
+          $ref: "#/components/responses/ResourceNotDiscoverable"
+        "409":
+          $ref: "#/components/responses/CommandConflict"
+
+  /api/v1/conversations/{conversationId}/messages:
+    get:
+      tags: [Conversations]
+      operationId: listConversationMessages
+      summary: 按会话序号补拉可见消息
+      parameters:
+        - $ref: "#/components/parameters/ConversationId"
+        - name: afterSequenceNo
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+      responses:
+        "200":
+          description: 权威消息页
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConversationMessagePage"
+        "401":
+          $ref: "#/components/responses/AuthenticationRequired"
+        "403":
+          $ref: "#/components/responses/TenantAccessDenied"
+        "404":
+          $ref: "#/components/responses/ResourceNotDiscoverable"
+    post:
+      tags: [Conversations]
+      operationId: sendConversationMessage
+      summary: 发送真人消息并按结构化目标选择是否调用数字员工
+      description: |
+        群聊普通消息没有 targets 时只写入真人消息，不调用模型、不预占智点。
+        数字员工直接会话可隐式使用唯一绑定员工；群聊必须通过选择、@ 或回复形成 targets。
+      parameters:
+        - $ref: "#/components/parameters/ConversationId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SendConversationMessageRequest"
+      responses:
+        "202":
+          description: 消息已写入；AI 调用已持久化排队
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConversationMessageCommandResponse"
+        "200":
+          description: 重放同一发送意图
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConversationMessageCommandResponse"
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "403":
+          $ref: "#/components/responses/TenantAccessDenied"
+        "404":
+          $ref: "#/components/responses/ResourceNotDiscoverable"
+        "409":
+          $ref: "#/components/responses/CommandConflict"
+        "422":
+          $ref: "#/components/responses/BusinessRuleRejected"
+
+  /api/v1/tasks:
+    post:
+      tags: [Tasks]
+      operationId: createTask
+      summary: 创建业务任务
+      description: |
+        创建请求只持久化业务任务、初始计划意图和后续执行命令，不同步等待模型或工具完成。
+        服务端在返回前完成租户、员工、会话、目标、模式、价格、预算和智点准入校验。
+
+        幂等范围为 `tenantId + actorId + operationCode + Idempotency-Key`。同键同请求哈希返回
+        第一次结果；同键不同请求哈希返回 `IDEMPOTENCY_REQUEST_CONFLICT`。自动重试不得更换
+        幂等键，也不得产生第二个收费意图。
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateTaskRequest"
+      responses:
+        "202":
+          description: 任务命令已持久化并接受异步处理
+          headers:
+            Location:
+              $ref: "#/components/headers/TaskLocation"
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
+            X-Trace-Id:
+              $ref: "#/components/headers/TraceId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskCommandAccepted"
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/AuthenticationRequired"
+        "403":
+          $ref: "#/components/responses/SecurityRequestRejected"
+        "404":
+          $ref: "#/components/responses/ResourceNotDiscoverable"
+        "409":
+          $ref: "#/components/responses/CommandConflict"
+        "422":
+          $ref: "#/components/responses/BusinessRuleRejected"
+
+  /api/v1/tasks/{taskId}:
+    get:
+      tags: [Tasks]
+      operationId: getTaskSnapshot
+      summary: 获取任务权威快照
+      description: |
+        返回 Task、当前 PlanVersion、TaskStep、当前执行绑定、成果/审批/交付摘要、智点摘要和
+        `allowedActions`。任务成功、成果可用、审批通过和交付成功分别表达。
+
+        `businessTrace` 仅包含业务轨迹白名单，不得包含模型隐藏思维链、系统提示词、密钥、
+        原始鉴权头或用户无权正文。
+      parameters:
+        - $ref: "#/components/parameters/TaskId"
+        - $ref: "#/components/parameters/IfNoneMatch"
+      responses:
+        "200":
+          description: 最新任务快照
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+            Cache-Control:
+              $ref: "#/components/headers/PrivateRevalidate"
+            X-Trace-Id:
+              $ref: "#/components/headers/TraceId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskSnapshot"
+        "304":
+          description: ETag 未变化；不返回响应体
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+            Cache-Control:
+              $ref: "#/components/headers/PrivateRevalidate"
+        "401":
+          $ref: "#/components/responses/AuthenticationRequired"
+        "404":
+          $ref: "#/components/responses/ResourceNotDiscoverable"
+
+  /api/v1/tasks/{taskId}/events:
+    get:
+      tags: [Tasks]
+      operationId: subscribeTaskEvents
+      summary: 订阅任务 SSE
+      description: |
+        只读、至少一次投递的任务事件流。客户端按 `eventId` 幂等消费；SSE 重连不能触发
+        任何业务命令。`Last-Event-ID` 与 `afterEventId` 二选一；两者同时提供且值不同返回 400。
+
+        游标仍在保留窗口内时从下一事件重放；游标过期、不可修复缺口或权限版本变化时，
+        流内发送 `stream.reset_required`，客户端重新获取任务快照并使用其 `resumeEventId`
+        重新订阅。事件信封以 `contracts/asyncapi/dianlian-events-v1.yaml` 为唯一事件字典。
+        TASK 事件只通知客户端刷新；任务状态、步骤、成果和费用仍以任务快照为准。
+      parameters:
+        - $ref: "#/components/parameters/TaskId"
+        - $ref: "#/components/parameters/LastEventId"
+        - $ref: "#/components/parameters/AfterEventId"
+      responses:
+        "200":
+          description: |
+            SSE 字节流。每个业务事件使用 `id: {eventId}`、`event: {eventType}`，
+            `data:` 为完整 `SseEventEnvelope` JSON。
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/SseNoCache"
+            X-Accel-Buffering:
+              description: 反向代理必须关闭 SSE 缓冲
+              schema:
+                type: string
+                const: "no"
+            X-Trace-Id:
+              $ref: "#/components/headers/TraceId"
+          content:
+            text/event-stream:
+              schema:
+                type: string
+              examples:
+                stepUpdated:
+                  summary: 任务快照失效通知
+                  value: |-
+                    id: 187
+                    event: task.snapshot.invalidated
+                    data: {"schemaVersion":1,"eventId":"187","streamType":"TASK","streamId":"task_01","eventType":"task.snapshot.invalidated","aggregateType":"TASK","aggregateId":"task_01","aggregateVersion":6,"occurredAt":"2026-08-11T10:00:00Z","visibilityVersion":"permission-v9","traceId":"trace_01","payload":{"taskId":"task_01","reason":"TASK_CHANGED"}}
+
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/AuthenticationRequired"
+        "403":
+          $ref: "#/components/responses/SecurityRequestRejected"
+        "404":
+          $ref: "#/components/responses/ResourceNotDiscoverable"
+        "503":
+          $ref: "#/components/responses/TaskEventStreamUnavailable"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        点联各端统一使用的短期 Access Token。Web、App、小程序和桌面端均通过
+        `Authorization: Bearer <JWT>` 发送；服务端不得从请求体、查询参数或租户头读取登录态。
+
+  parameters:
+    EnterpriseAgentId:
+      name: enterpriseAgentId
+      in: path
+      required: true
+      description: 当前租户内的企业数字员工 ID
+      schema:
+        $ref: "#/components/schemas/StableId"
+    ConversationId:
+      name: conversationId
+      in: path
+      required: true
+      description: 当前租户内且当前用户仍为有效成员的会话 ID
+      schema:
+        $ref: "#/components/schemas/StableId"
+    ModelCapabilityTypePath:
+      name: capabilityType
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/ModelCapabilityType"
+    TaskId:
+      name: taskId
+      in: path
+      required: true
+      description: 当前租户内稳定任务 ID
+      schema:
+        $ref: "#/components/schemas/StableId"
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: |
+        客户端生成的业务命令幂等键。长度 16～128，仅允许字母、数字、点、下划线、冒号和短横线。
+      schema:
+        type: string
+        minLength: 16
+        maxLength: 128
+        pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$"
+    IfNoneMatch:
+      name: If-None-Match
+      in: header
+      required: false
+      description: 上一次响应的完整 ETag，包括引号；命中时返回 304。
+      schema:
+        type: string
+        maxLength: 160
+    EmployeeIfMatch:
+      name: If-Match
+      in: header
+      required: true
+      description: 员工详情返回的完整强 ETag；格式固定为 `"ea-{stateVersion}"`。
+      schema:
+        type: string
+        pattern: '^"ea-(0|[1-9][0-9]*)"$'
+        maxLength: 64
+    LastEventId:
+      name: Last-Event-ID
+      in: header
+      required: false
+      description: 当前 TASK 流最后已幂等应用的事件 ID；事件 ID 仅在所属流内有序。
+      schema:
+        $ref: "#/components/schemas/EventId"
+    AfterEventId:
+      name: afterEventId
+      in: query
+      required: false
+      description: 与 Last-Event-ID 等价的显式恢复游标；不得与不同值的 Last-Event-ID 同时提交。
+      schema:
+        $ref: "#/components/schemas/EventId"
+
+  headers:
+    ETag:
+      description: 强 ETag，绑定资源、当前租户、当前用户、权限版本和快照版本。
+      schema:
+        type: string
+        pattern: '^"[^"\\r\\n]{1,150}"$'
+    TraceId:
+      description: 用于跨端排查的追踪 ID，不包含业务正文。
+      schema:
+        type: string
+        maxLength: 128
+    NoStore:
+      description: 会话与权限摘要禁止缓存。
+      schema:
+        type: string
+        const: no-store
+    PrivateRevalidate:
+      description: 私有缓存必须依据 ETag 重新验证。
+      schema:
+        type: string
+        const: "private, no-cache, must-revalidate"
+    SseNoCache:
+      description: SSE 禁止代理缓存与转换。
+      schema:
+        type: string
+        const: "no-store, no-transform"
+    TaskLocation:
+      description: 已创建任务的权威查询地址。
+      schema:
+        type: string
+        format: uri-reference
+        pattern: "^/api/v1/tasks/[^/]+$"
+    IdempotencyReplayed:
+      description: true 表示本次响应复用了同一幂等意图的第一次结果。
+      schema:
+        type: boolean
+
+  responses:
+    InvalidCredentials:
+      description: 账号或密码错误；响应不得暴露账号是否存在、被停用或被锁定
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetail"
+          example:
+            type: https://dianlian.example/problems/invalid-credentials
+            title: 账号或密码错误
+            status: 401
+            detail: 账号或密码不正确，请重新输入。
+            code: INVALID_CREDENTIALS
+            traceId: trace_01
+            retryable: false
+            action: RETRY_LOGIN
+    RefreshTokenInvalid:
+      description: Refresh Token 不存在、过期、已消费或所属会话已撤销
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetail"
+          example:
+            type: https://dianlian.example/problems/refresh-token-invalid
+            title: 登录状态已失效
+            status: 401
+            detail: 请重新登录后继续。
+            code: REFRESH_TOKEN_INVALID
+            traceId: trace_01
+            retryable: false
+            action: REAUTHENTICATE
+    AuthenticationRequired:
+      description: 未登录、会话过期或认证已失效
+      headers:
+        X-Trace-Id:
+          $ref: "#/components/headers/TraceId"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetail"
+          example:
+            type: https://dianlian.example/problems/authentication-required
+            title: 登录状态已失效
+            status: 401
+            detail: 请重新登录后继续。
+            code: AUTHENTICATION_REQUIRED
+            traceId: trace_01
+            retryable: false
+            action: REAUTHENTICATE
+    SecurityRequestRejected:
+      description: 请求身份无权执行该写操作或安全上下文已经变化
+      headers:
+        Cache-Control:
+          $ref: "#/components/headers/NoStore"
+        X-Trace-Id:
+          $ref: "#/components/headers/TraceId"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetail"
+          example:
+            type: https://dianlian.example/problems/access-denied
+            title: 无权执行此操作
+            status: 403
+            detail: 当前身份没有执行此操作的权限。
+            code: ACCESS_DENIED
+            traceId: trace_01
+            retryable: false
+            action: RETURN_SAFE_PAGE
+    TenantAccessDenied:
+      description: 当前租户停用、成员关系失效或无权进入本端
+      headers:
+        X-Trace-Id:
+          $ref: "#/components/headers/TraceId"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetail"
+    ResourceNotDiscoverable:
+      description: 资源不存在或当前主体无权知道其存在；两种情况使用相同响应
+      headers:
+        X-Trace-Id:
+          $ref: "#/components/headers/TraceId"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetail"
+          example:
+            type: https://dianlian.example/problems/resource-not-found-or-forbidden
+            title: 无法访问该资源
+            status: 404
+            detail: 资源不存在或你没有访问权限。
+            code: RESOURCE_NOT_FOUND_OR_FORBIDDEN
+            traceId: trace_01
+            retryable: false
+            action: RETURN_SAFE_PAGE
+    ValidationFailed:
+      description: 请求字段、Target、协作模式或恢复游标不合法
+      headers:
+        X-Trace-Id:
+          $ref: "#/components/headers/TraceId"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetail"
+    TaskEventStreamUnavailable:
+      description: 任务事件连接容量暂不可用；客户端应降级读取任务快照并按退避策略重连
+      headers:
+        Cache-Control:
+          $ref: "#/components/headers/NoStore"
+        X-Trace-Id:
+          $ref: "#/components/headers/TraceId"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetail"
+    CommandConflict:
+      description: 幂等键、成员版本、计划版本或其他并发事实冲突
+      headers:
+        X-Trace-Id:
+          $ref: "#/components/headers/TraceId"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetail"
+          examples:
+            idempotencyConflict:
+              value:
+                type: https://dianlian.example/problems/idempotency-request-conflict
+                title: 重复请求内容不一致
+                status: 409
+                detail: 同一幂等键已用于不同请求，请检查客户端命令。
+                code: IDEMPOTENCY_REQUEST_CONFLICT
+                traceId: trace_01
+                retryable: false
+                action: CREATE_NEW_INTENT
+            membershipChanged:
+              value:
+                type: https://dianlian.example/problems/conversation-membership-changed
+                title: 群成员权限已变化
+                status: 409
+                detail: 消息或任务未提交，请刷新群成员状态后重试。
+                code: CONVERSATION_MEMBERSHIP_CHANGED
+                traceId: trace_02
+                retryable: false
+                action: REFRESH_CONVERSATION
+    BusinessRuleRejected:
+      description: 当前状态、员工、智点、预算、模型或工具策略不允许开始任务
+      headers:
+        X-Trace-Id:
+          $ref: "#/components/headers/TraceId"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetail"
+          example:
+            type: https://dianlian.example/problems/quota-insufficient
+            title: 智点不足
+            status: 422
+            detail: 当前智点不足，未向模型或工具发出请求。
+            code: QUOTA_INSUFFICIENT
+            traceId: trace_01
+            retryable: false
+            action: CONTACT_POINT_ADMIN
+    EmployeePreconditionRequired:
+      description: 员工状态变更请求缺少 If-Match
+      headers:
+        Cache-Control:
+          $ref: "#/components/headers/NoStore"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetail"
+          example:
+            type: https://dianlian.example/problems/employee-if-match-required
+            title: 需要员工版本条件
+            status: 428
+            detail: 请先读取员工详情，并携带响应中的 ETag 作为 If-Match。
+            code: EMPLOYEE_IF_MATCH_REQUIRED
+            traceId: trace_01
+            retryable: false
+            action: REFRESH_RESOURCE
+    EmployeePreconditionFailed:
+      description: If-Match 与员工当前 stateVersion 不一致
+      headers:
+        Cache-Control:
+          $ref: "#/components/headers/NoStore"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetail"
+          example:
+            type: https://dianlian.example/problems/employee-state-version-mismatch
+            title: 员工状态已变化
+            status: 412
+            detail: 请刷新员工详情并基于最新 ETag 重试。
+            code: EMPLOYEE_STATE_VERSION_MISMATCH
+            traceId: trace_01
+            retryable: false
+            action: REFRESH_RESOURCE
+
+  schemas:
+    StableId:
+      type: string
+      minLength: 1
+      maxLength: 128
+      pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    EventId:
+      type: string
+      minLength: 1
+      maxLength: 128
+      pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    Instant:
+      type: string
+      format: date-time
+    PointValue:
+      type: string
+      description: 面向用户的非负智点十进制定点字符串，最多 6 位小数；不得使用浮点数结算。
+      pattern: "^(0|[1-9][0-9]*)(\\.[0-9]{1,6})?$"
+      examples: ["12.5"]
+
+    ClientType:
+      type: string
+      enum: [WEB, MINI_PROGRAM, APP, DESKTOP]
+    PasswordLoginRequest:
+      type: object
+      additionalProperties: false
+      required: [username, password, clientType]
+      properties:
+        username:
+          type: string
+          minLength: 1
+          maxLength: 200
+        password:
+          type: string
+          minLength: 1
+          maxLength: 200
+          writeOnly: true
+        clientType:
+          $ref: "#/components/schemas/ClientType"
+        deviceId:
+          type: [string, "null"]
+          maxLength: 128
+        deviceName:
+          type: [string, "null"]
+          maxLength: 100
+    RefreshTokenRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        refreshToken:
+          type: [string, "null"]
+          maxLength: 1024
+          writeOnly: true
+    TokenResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - tokenType
+        - accessToken
+        - expiresIn
+        - refreshToken
+        - refreshExpiresIn
+        - sessionId
+        - clientType
+      properties:
+        tokenType:
+          type: string
+          const: Bearer
+        accessToken:
+          type: string
+          minLength: 1
+          maxLength: 4096
+        expiresIn:
+          type: integer
+          minimum: 1
+          maximum: 3600
+        refreshToken:
+          description: Web 固定为 null；其他客户端返回单次 Refresh Token。
+          type: [string, "null"]
+          maxLength: 1024
+        refreshExpiresIn:
+          type: integer
+          minimum: 1
+        sessionId:
+          $ref: "#/components/schemas/StableId"
+        clientType:
+          $ref: "#/components/schemas/ClientType"
+
+    SessionView:
+      type: object
+      additionalProperties: false
+      required:
+        - sessionId
+        - user
+        - activeTenant
+        - roleGrants
+        - permissions
+        - permissionVersion
+        - serverTime
+      properties:
+        sessionId:
+          $ref: "#/components/schemas/StableId"
+        user:
+          $ref: "#/components/schemas/SessionUser"
+        activeTenant:
+          oneOf:
+            - $ref: "#/components/schemas/SessionTenant"
+            - type: "null"
+        roleGrants:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/RoleGrant"
+        permissions:
+          type: array
+          uniqueItems: true
+          maxItems: 500
+          items:
+            type: string
+            pattern: "^[a-z][a-z0-9_.:-]{1,127}$"
+        permissionVersion:
+          type: string
+          minLength: 1
+          maxLength: 128
+        serverTime:
+          $ref: "#/components/schemas/Instant"
+    SessionUser:
+      type: object
+      additionalProperties: false
+      required: [id, displayName, accountStatus]
+      properties:
+        id:
+          $ref: "#/components/schemas/StableId"
+        displayName:
+          type: string
+          minLength: 1
+          maxLength: 100
+        avatarUrl:
+          type: [string, "null"]
+          format: uri-reference
+          maxLength: 2048
+        accountStatus:
+          type: string
+          enum: [ACTIVE, SUSPENDED]
+    SessionTenant:
+      type: object
+      additionalProperties: false
+      required: [id, displayName, tenantStatus, membershipStatus]
+      properties:
+        id:
+          $ref: "#/components/schemas/StableId"
+        displayName:
+          type: string
+          minLength: 1
+          maxLength: 200
+        tenantStatus:
+          type: string
+          enum: [ACTIVE, SUSPENDED, CLOSED]
+        membershipStatus:
+          type: string
+          enum: [ACTIVE, SUSPENDED, LEFT, REMOVED, EXPIRED]
+    RoleGrant:
+      type: object
+      additionalProperties: false
+      required: [roleCode, scopeType, scopeId]
+      properties:
+        roleCode:
+          type: string
+          pattern: "^[A-Z][A-Z0-9_]{1,63}$"
+        scopeType:
+          $ref: "#/components/schemas/DataScopeType"
+        scopeId:
+          $ref: "#/components/schemas/StableId"
+
+    DataScopeType:
+      type: string
+      enum:
+        - PLATFORM
+        - TENANT
+        - DEPARTMENT
+        - PROJECT
+        - CONVERSATION
+        - USER_AGENT
+        - GROUP_AGENT
+        - AGENT
+        - OBJECT_GRANT
+        - SUPPORT_SESSION
+
+    OfficeSnapshot:
+      type: object
+      additionalProperties: false
+      required:
+        - snapshotVersion
+        - generatedAt
+        - mappingVersion
+        - lastOfficeEventId
+        - resumeEventId
+        - agents
+        - rooms
+        - tasks
+        - artifacts
+        - todos
+        - hasMore
+      properties:
+        snapshotVersion:
+          type: string
+          minLength: 1
+          maxLength: 128
+        generatedAt:
+          $ref: "#/components/schemas/Instant"
+        mappingVersion:
+          type: string
+          minLength: 1
+          maxLength: 64
+        lastOfficeEventId:
+          $ref: "#/components/schemas/EventId"
+        resumeEventId:
+          $ref: "#/components/schemas/EventId"
+        agents:
+          type: array
+          maxItems: 50
+          items:
+            $ref: "#/components/schemas/OfficeAgentSummary"
+        rooms:
+          type: array
+          maxItems: 50
+          items:
+            $ref: "#/components/schemas/OfficeRoomSummary"
+        tasks:
+          type: array
+          maxItems: 50
+          items:
+            $ref: "#/components/schemas/OfficeTaskSummary"
+        artifacts:
+          type: array
+          maxItems: 50
+          items:
+            $ref: "#/components/schemas/OfficeArtifactSummary"
+        todos:
+          type: array
+          maxItems: 50
+          items:
+            $ref: "#/components/schemas/OfficeTodoSummary"
+        hasMore:
+          type: object
+          additionalProperties: false
+          required: [agents, rooms, tasks, artifacts, todos]
+          properties:
+            agents: { type: boolean }
+            rooms: { type: boolean }
+            tasks: { type: boolean }
+            artifacts: { type: boolean }
+            todos: { type: boolean }
+    OfficeAgentSummary:
+      type: object
+      additionalProperties: false
+      required: [agentId, displayName, roleName, capabilityCode, profile, skillLabels, officeStatus, activeTaskCount, pendingActionCount, allowedActions]
+      properties:
+        agentId:
+          $ref: "#/components/schemas/StableId"
+        displayName:
+          type: string
+          minLength: 1
+          maxLength: 100
+        roleName:
+          type: string
+          minLength: 1
+          maxLength: 100
+        capabilityCode:
+          type: string
+          pattern: "^[A-Z][A-Z0-9_]{1,63}$"
+          description: 员工版本冻结的通用能力代码；首批可为 GRAPHIC_DESIGN、CONTRACT_REVIEW 或 QUOTATION。
+        profile:
+          type: string
+          minLength: 1
+          maxLength: 500
+        skillLabels:
+          type: array
+          maxItems: 20
+          items:
+            type: string
+            minLength: 1
+            maxLength: 100
+        avatarUrl:
+          type: [string, "null"]
+          format: uri-reference
+        officeStatus:
+          type: string
+          enum: [IDLE, WORKING, WAITING_USER, WAITING_APPROVAL, NEEDS_ATTENTION]
+        activeTaskCount:
+          type: integer
+          minimum: 0
+        pendingActionCount:
+          type: integer
+          minimum: 0
+        statusReasonCode:
+          type: [string, "null"]
+          maxLength: 64
+        currentTaskTitle:
+          type: [string, "null"]
+          maxLength: 200
+        allowedActions:
+          type: array
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/AllowedAction"
+    OfficeRoomSummary:
+      type: object
+      additionalProperties: false
+      required: [conversationId, displayName, conversationType, unreadCount, allowedActions]
+      properties:
+        conversationId:
+          $ref: "#/components/schemas/StableId"
+        displayName:
+          type: string
+          minLength: 1
+          maxLength: 200
+        conversationType:
+          type: string
+          enum: [DIRECT, GROUP]
+        unreadCount:
+          type: integer
+          minimum: 0
+        allowedActions:
+          type: array
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/AllowedAction"
+    OfficeTaskSummary:
+      type: object
+      additionalProperties: false
+      required: [taskId, title, status, displayStatus, responsibleAgentIds, currentStepTitle, completedStepCount, totalStepCount, pointSummary, updatedAt, allowedActions]
+      properties:
+        taskId:
+          $ref: "#/components/schemas/StableId"
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        status:
+          $ref: "#/components/schemas/TaskStatus"
+        displayStatus:
+          type: string
+          enum: [DRAFT, PROCESSING, WAITING_USER, WAITING_APPROVAL, WAITING_QUOTA, NEEDS_ATTENTION, ENDED]
+        responsibleAgentIds:
+          type: array
+          minItems: 1
+          maxItems: 20
+          items:
+            $ref: "#/components/schemas/StableId"
+        currentStepTitle:
+          type: [string, "null"]
+          minLength: 1
+          maxLength: 200
+        completedStepCount:
+          type: integer
+          minimum: 0
+        totalStepCount:
+          type: integer
+          minimum: 0
+        pointSummary:
+          $ref: "#/components/schemas/TaskPointSummary"
+        updatedAt:
+          $ref: "#/components/schemas/Instant"
+        allowedActions:
+          type: array
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/AllowedAction"
+    OfficeArtifactSummary:
+      type: object
+      additionalProperties: false
+      required: [artifactVersionId, title, artifactType, artifactStatus, createdAt, allowedActions]
+      properties:
+        artifactVersionId:
+          $ref: "#/components/schemas/StableId"
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        artifactType:
+          type: string
+          minLength: 1
+          maxLength: 64
+        artifactStatus:
+          $ref: "#/components/schemas/ArtifactStatus"
+        createdAt:
+          $ref: "#/components/schemas/Instant"
+        allowedActions:
+          type: array
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/AllowedAction"
+    OfficeTodoSummary:
+      type: object
+      additionalProperties: false
+      required: [todoId, todoType, objectId, title, dueState]
+      properties:
+        todoId:
+          $ref: "#/components/schemas/StableId"
+        todoType:
+          type: string
+          enum: [TASK_INPUT, TASK_CONFIRMATION, APPROVAL, QUOTA, EXCEPTION]
+        objectId:
+          $ref: "#/components/schemas/StableId"
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        dueState:
+          type: string
+          enum: [NORMAL, DUE_SOON, OVERDUE]
+
+    AgentVersionListResponse:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/AgentVersionView"
+    AgentVersionView:
+      type: object
+      additionalProperties: false
+      required: [templateId, agentVersionId, templateCode, templateName, templateDescription, version, capabilityCode, inputSchema, executionTemplate, pointEstimateMicroCredit, status, enterpriseVisibility, publishedAt]
+      properties:
+        templateId:
+          $ref: "#/components/schemas/StableId"
+        agentVersionId:
+          $ref: "#/components/schemas/StableId"
+        templateCode:
+          type: string
+          minLength: 1
+          maxLength: 64
+          pattern: "^[A-Za-z][A-Za-z0-9._-]{0,63}$"
+        templateName:
+          type: string
+          minLength: 1
+          maxLength: 100
+        templateDescription:
+          type: string
+          minLength: 1
+          maxLength: 500
+        version:
+          type: string
+          minLength: 1
+          maxLength: 32
+        capabilityCode:
+          type: string
+          pattern: "^[A-Z][A-Z0-9_]{1,63}$"
+        inputSchema:
+          $ref: "#/components/schemas/EmployeeInputSchema"
+        executionTemplate:
+          $ref: "#/components/schemas/EmployeeExecutionTemplate"
+        pointEstimateMicroCredit:
+          type: string
+          pattern: "^[1-9][0-9]{0,18}$"
+          description: 智点最小整数单位；管理端不得使用浮点数参与账务计算。
+        status:
+          type: string
+          enum: [PUBLISHED, RETIRED]
+        enterpriseVisibility:
+          $ref: "#/components/schemas/EnterpriseVisibility"
+        publishedAt:
+          type: string
+          format: date-time
+    EnterpriseVisibility:
+      type: object
+      additionalProperties: false
+      required: [mode, tenantIds]
+      properties:
+        mode:
+          type: string
+          enum: [ALL, ALLOWLIST]
+        tenantIds:
+          type: array
+          uniqueItems: true
+          maxItems: 1000
+          items:
+            $ref: "#/components/schemas/StableId"
+    PublishAgentVersionRequest:
+      type: object
+      additionalProperties: false
+      required: [templateCode, templateName, templateDescription, version, capabilityCode, inputSchema, executionTemplate, pointEstimateMicroCredit, enterpriseVisibility]
+      properties:
+        templateCode:
+          type: string
+          minLength: 1
+          maxLength: 64
+          pattern: "^[A-Za-z][A-Za-z0-9._-]{0,63}$"
+        templateName:
+          type: string
+          minLength: 1
+          maxLength: 100
+        templateDescription:
+          type: string
+          minLength: 1
+          maxLength: 500
+        version:
+          type: string
+          minLength: 1
+          maxLength: 32
+        capabilityCode:
+          type: string
+          pattern: "^[A-Z][A-Z0-9_]{1,63}$"
+        inputSchema:
+          $ref: "#/components/schemas/EmployeeInputSchema"
+        executionTemplate:
+          $ref: "#/components/schemas/EmployeeExecutionTemplate"
+        pointEstimateMicroCredit:
+          type: string
+          pattern: "^[1-9][0-9]{0,18}$"
+          description: 智点最小整数单位；用字符串传输，避免 JavaScript int64 精度丢失。
+        enterpriseVisibility:
+          $ref: "#/components/schemas/EnterpriseVisibility"
+    EnterpriseAgentListResponse:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/EnterpriseAgentView"
+    EnterpriseAgentView:
+      type: object
+      additionalProperties: false
+      required: [enterpriseAgentId, templateId, agentVersionId, employeeCode, displayName, capabilityCode, status, stateVersion, activeConfigurationVersionId, activatedBy, activatedAt, hiredAt]
+      properties:
+        enterpriseAgentId:
+          $ref: "#/components/schemas/StableId"
+        templateId:
+          $ref: "#/components/schemas/StableId"
+        agentVersionId:
+          $ref: "#/components/schemas/StableId"
+        employeeCode:
+          type: string
+          minLength: 1
+          maxLength: 64
+          pattern: "^[A-Za-z][A-Za-z0-9._-]{0,63}$"
+        displayName:
+          type: string
+          minLength: 1
+          maxLength: 100
+        capabilityCode:
+          type: string
+          pattern: "^[A-Z][A-Z0-9_]{1,63}$"
+        status:
+          type: string
+          enum: [DRAFT, ACTIVE, RESTRICTED, DISABLED]
+        stateVersion:
+          type: string
+          pattern: "^(0|[1-9][0-9]*)$"
+        activeConfigurationVersionId:
+          type: [string, "null"]
+          minLength: 1
+          maxLength: 128
+          pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        activatedBy:
+          type: [string, "null"]
+          minLength: 1
+          maxLength: 128
+          pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        activatedAt:
+          type: [string, "null"]
+          format: date-time
+        hiredAt:
+          type: string
+          format: date-time
+    HireEnterpriseAgentRequest:
+      type: object
+      additionalProperties: false
+      required: [agentVersionId, employeeCode, displayName]
+      properties:
+        agentVersionId:
+          $ref: "#/components/schemas/StableId"
+        employeeCode:
+          type: string
+          minLength: 1
+          maxLength: 64
+          pattern: "^[A-Za-z][A-Za-z0-9._-]{0,63}$"
+        displayName:
+          type: string
+          minLength: 1
+          maxLength: 100
+    CreateEnterpriseAgentConfigurationRequest:
+      type: object
+      additionalProperties: false
+      required: [displayNameSnapshot, profile, enterpriseInstructions, modelPolicyMode, knowledgeScopeMode, visibilityScope]
+      properties:
+        displayNameSnapshot:
+          type: string
+          minLength: 1
+          maxLength: 100
+        profile:
+          type: string
+          minLength: 1
+          maxLength: 2000
+        enterpriseInstructions:
+          type: string
+          maxLength: 20000
+        modelPolicyMode:
+          type: string
+          enum: [PLATFORM_DEFAULT, AGENT_ROUTE]
+        knowledgeScopeMode:
+          type: string
+          enum: [NONE, ENTERPRISE_AUTHORIZED, ENTERPRISE_REQUIRED]
+        visibilityScope:
+          type: string
+          const: TENANT
+    ActivateEnterpriseAgentRequest:
+      type: object
+      additionalProperties: false
+      required: [configurationVersionId]
+      properties:
+        configurationVersionId:
+          $ref: "#/components/schemas/StableId"
+    EnterpriseAgentDetailView:
+      type: object
+      additionalProperties: false
+      required: [enterpriseAgentId, templateId, agentVersionId, employeeCode, displayName, capabilityCode, status, stateVersion, activeConfigurationVersionId, activatedBy, activatedAt, hiredAt, template, latestConfiguration, readiness, allowedActions]
+      properties:
+        enterpriseAgentId:
+          $ref: "#/components/schemas/StableId"
+        templateId:
+          $ref: "#/components/schemas/StableId"
+        agentVersionId:
+          $ref: "#/components/schemas/StableId"
+        employeeCode:
+          type: string
+          minLength: 1
+          maxLength: 64
+          pattern: "^[A-Za-z][A-Za-z0-9._-]{0,63}$"
+        displayName:
+          type: string
+          minLength: 1
+          maxLength: 100
+        capabilityCode:
+          type: string
+          pattern: "^[A-Z][A-Z0-9_]{1,63}$"
+        status:
+          type: string
+          enum: [DRAFT, ACTIVE, RESTRICTED, DISABLED]
+        stateVersion:
+          type: string
+          pattern: "^(0|[1-9][0-9]*)$"
+        activeConfigurationVersionId:
+          type: [string, "null"]
+          minLength: 1
+          maxLength: 128
+          pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        activatedBy:
+          type: [string, "null"]
+          minLength: 1
+          maxLength: 128
+          pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        activatedAt:
+          type: [string, "null"]
+          format: date-time
+        hiredAt:
+          type: string
+          format: date-time
+        template:
+          $ref: "#/components/schemas/EnterpriseAgentTemplateView"
+        latestConfiguration:
+          anyOf:
+            - $ref: "#/components/schemas/EnterpriseAgentConfigurationView"
+            - type: "null"
+        readiness:
+          $ref: "#/components/schemas/EnterpriseAgentReadinessView"
+        allowedActions:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+            enum: [VIEW, CREATE_CONFIGURATION_VERSION, ACTIVATE]
+    EnterpriseAgentTemplateView:
+      type: object
+      additionalProperties: false
+      required: [templateName, templateDescription, version]
+      properties:
+        templateName:
+          type: string
+          minLength: 1
+          maxLength: 100
+        templateDescription:
+          type: string
+          minLength: 1
+          maxLength: 500
+        version:
+          type: string
+          minLength: 1
+          maxLength: 32
+    EnterpriseAgentConfigurationView:
+      type: object
+      additionalProperties: false
+      required: [configurationVersionId, revision, displayNameSnapshot, profile, enterpriseInstructions, modelPolicyMode, knowledgeScopeMode, visibilityScope, status, createdBy, createdAt, activatedBy, activatedAt]
+      properties:
+        configurationVersionId:
+          $ref: "#/components/schemas/StableId"
+        revision:
+          type: string
+          pattern: "^[1-9][0-9]*$"
+        displayNameSnapshot:
+          type: string
+          minLength: 1
+          maxLength: 100
+        profile:
+          type: string
+          minLength: 1
+          maxLength: 2000
+        enterpriseInstructions:
+          type: string
+          maxLength: 20000
+        modelPolicyMode:
+          type: string
+          enum: [PLATFORM_DEFAULT, AGENT_ROUTE]
+        knowledgeScopeMode:
+          type: string
+          enum: [NONE, ENTERPRISE_AUTHORIZED, ENTERPRISE_REQUIRED]
+        visibilityScope:
+          type: string
+          const: TENANT
+        status:
+          type: string
+          enum: [DRAFT, ACTIVE, SUPERSEDED]
+        createdBy:
+          $ref: "#/components/schemas/StableId"
+        createdAt:
+          $ref: "#/components/schemas/Instant"
+        activatedBy:
+          type: [string, "null"]
+          minLength: 1
+          maxLength: 128
+          pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        activatedAt:
+          type: [string, "null"]
+          format: date-time
+    EnterpriseAgentReadinessView:
+      type: object
+      additionalProperties: false
+      required: [ready, blockers]
+      properties:
+        ready:
+          type: boolean
+        blockers:
+          type: array
+          maxItems: 20
+          items:
+            $ref: "#/components/schemas/EnterpriseAgentReadinessBlockerView"
+    EnterpriseAgentReadinessBlockerView:
+      type: object
+      additionalProperties: false
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          pattern: "^[A-Z][A-Z0-9_]{2,63}$"
+        message:
+          type: string
+          minLength: 1
+          maxLength: 500
+    EmployeeWorkspaceView:
+      type: object
+      additionalProperties: false
+      required:
+        - agentId
+        - agentVersionId
+        - displayName
+        - roleName
+        - capabilityCode
+        - profile
+        - skillLabels
+        - inputSchema
+        - executionTemplate
+        - pointEstimate
+        - allowedActions
+      properties:
+        agentId:
+          $ref: "#/components/schemas/StableId"
+        agentVersionId:
+          $ref: "#/components/schemas/StableId"
+        displayName:
+          type: string
+          minLength: 1
+          maxLength: 100
+        roleName:
+          type: string
+          minLength: 1
+          maxLength: 100
+        capabilityCode:
+          type: string
+          pattern: "^[A-Z][A-Z0-9_]{1,63}$"
+        profile:
+          type: string
+          minLength: 1
+          maxLength: 500
+        skillLabels:
+          type: array
+          maxItems: 20
+          items:
+            type: string
+            minLength: 1
+            maxLength: 100
+        avatarUrl:
+          type: [string, "null"]
+          format: uri-reference
+        inputSchema:
+          $ref: "#/components/schemas/EmployeeInputSchema"
+        executionTemplate:
+          $ref: "#/components/schemas/EmployeeExecutionTemplate"
+        pointEstimate:
+          $ref: "#/components/schemas/PointValue"
+        allowedActions:
+          type: array
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/AllowedAction"
+    EmployeeInputSchema:
+      type: object
+      additionalProperties: false
+      required: [schemaId, schemaVersion, jsonSchema]
+      properties:
+        schemaId:
+          type: string
+          pattern: "^[a-z][a-z0-9_.-]{1,127}$"
+        schemaVersion:
+          type: string
+          minLength: 1
+          maxLength: 32
+        jsonSchema:
+          type: object
+          additionalProperties: true
+          description: JSON Schema Draft 2020-12 对象；前端按受支持字段渲染，服务端仍做最终校验。
+    EmployeeExecutionTemplate:
+      type: object
+      additionalProperties: false
+      required: [templateCode, version, steps]
+      properties:
+        templateCode:
+          type: string
+          minLength: 1
+          maxLength: 96
+        version:
+          type: string
+          minLength: 1
+          maxLength: 32
+        steps:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/EmployeeExecutionStep"
+    EmployeeExecutionStep:
+      type: object
+      additionalProperties: false
+      required: [stepKey, title, executorType, dependsOn, humanCheckpoint]
+      properties:
+        stepKey:
+          type: string
+          minLength: 1
+          maxLength: 96
+        title:
+          type: string
+          minLength: 1
+          maxLength: 160
+        executorType:
+          type: string
+          enum: [MODEL, RETRIEVAL, RULE_ENGINE, TOOL, HUMAN_CHECKPOINT, SUBTASK]
+        dependsOn:
+          type: array
+          maxItems: 100
+          items:
+            type: string
+            minLength: 1
+            maxLength: 100
+        inputSchemaRef:
+          type: [string, "null"]
+          maxLength: 128
+        outputSchemaRef:
+          type: [string, "null"]
+          maxLength: 128
+        humanCheckpoint:
+          type: boolean
+
+    ModelCapabilityType:
+      type: string
+      enum: [TEXT_CHAT, TEXT_REASONING, VISION_UNDERSTANDING, IMAGE_GENERATION, IMAGE_EDITING, EMBEDDING, RERANK, OCR]
+    RegisterModelDefinitionRequest:
+      type: object
+      additionalProperties: false
+      required: [modelCode, displayName, providerCode, protocol, baseUrl, providerModelName, credentialRef, capabilityType, temperature, maxOutputTokens, inputRateMicroCreditPerMillionTokens, outputRateMicroCreditPerMillionTokens, reservationCeilingMicroCredit]
+      properties:
+        modelCode:
+          type: string
+          pattern: "^[A-Z][A-Z0-9_.-]{1,63}$"
+        displayName:
+          type: string
+          minLength: 1
+          maxLength: 100
+        providerCode:
+          type: string
+          pattern: "^[A-Z][A-Z0-9_.-]{1,63}$"
+        protocol:
+          type: string
+          const: OPENAI_COMPATIBLE
+        baseUrl:
+          type: string
+          format: uri
+          pattern: "^https://"
+        providerModelName:
+          type: string
+          minLength: 1
+          maxLength: 100
+        credentialRef:
+          type: string
+          pattern: "^env:[A-Z][A-Z0-9_]{2,127}$"
+          description: 仅保存环境变量引用，绝不提交真实 API Key。
+        capabilityType:
+          $ref: "#/components/schemas/ModelCapabilityType"
+        temperature:
+          type: number
+          minimum: 0
+          maximum: 2
+        maxOutputTokens:
+          type: integer
+          minimum: 1
+          maximum: 131072
+        inputRateMicroCreditPerMillionTokens:
+          type: string
+          pattern: "^(0|[1-9][0-9]{0,18})$"
+        outputRateMicroCreditPerMillionTokens:
+          type: string
+          pattern: "^(0|[1-9][0-9]{0,18})$"
+        reservationCeilingMicroCredit:
+          type: string
+          pattern: "^[1-9][0-9]{0,18}$"
+    ModelDefinitionView:
+      type: object
+      additionalProperties: false
+      required: [modelDefinitionId, modelCode, configurationVersion, displayName, providerCode, protocol, baseUrl, providerModelName, credentialRef, capabilityType, temperature, maxOutputTokens, inputRateMicroCreditPerMillionTokens, outputRateMicroCreditPerMillionTokens, reservationCeilingMicroCredit, status, createdBy, createdAt]
+      properties:
+        modelDefinitionId:
+          $ref: "#/components/schemas/StableId"
+        modelCode:
+          type: string
+          pattern: "^[A-Z][A-Z0-9_.-]{1,63}$"
+        configurationVersion:
+          type: integer
+          minimum: 1
+        displayName:
+          type: string
+          minLength: 1
+          maxLength: 100
+        providerCode:
+          type: string
+          pattern: "^[A-Z][A-Z0-9_.-]{1,63}$"
+        protocol:
+          type: string
+          const: OPENAI_COMPATIBLE
+        baseUrl:
+          type: string
+          format: uri
+        providerModelName:
+          type: string
+          minLength: 1
+          maxLength: 100
+        credentialRef:
+          type: string
+          pattern: "^env:[A-Z][A-Z0-9_]{2,127}$"
+        capabilityType:
+          $ref: "#/components/schemas/ModelCapabilityType"
+        temperature:
+          type: number
+          minimum: 0
+          maximum: 2
+        maxOutputTokens:
+          type: integer
+          minimum: 1
+          maximum: 131072
+        inputRateMicroCreditPerMillionTokens:
+          type: string
+          pattern: "^(0|[1-9][0-9]{0,18})$"
+        outputRateMicroCreditPerMillionTokens:
+          type: string
+          pattern: "^(0|[1-9][0-9]{0,18})$"
+        reservationCeilingMicroCredit:
+          type: string
+          pattern: "^[1-9][0-9]{0,18}$"
+        status:
+          type: string
+          enum: [ACTIVE, DISABLED]
+        createdBy:
+          $ref: "#/components/schemas/StableId"
+        createdAt:
+          $ref: "#/components/schemas/Instant"
+    ModelDefinitionListResponse:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          maxItems: 200
+          items:
+            $ref: "#/components/schemas/ModelDefinitionView"
+    SetModelRouteRequest:
+      type: object
+      additionalProperties: false
+      required: [modelDefinitionId]
+      properties:
+        modelDefinitionId:
+          $ref: "#/components/schemas/StableId"
+    ModelRouteBindingView:
+      type: object
+      additionalProperties: false
+      required: [routeBindingId, scopeType, tenantId, enterpriseAgentId, capabilityType, modelDefinitionId, stateVersion, status, createdBy, createdAt]
+      properties:
+        routeBindingId:
+          $ref: "#/components/schemas/StableId"
+        scopeType:
+          type: string
+          enum: [PLATFORM, AGENT]
+        tenantId:
+          type: [string, "null"]
+        enterpriseAgentId:
+          type: [string, "null"]
+        capabilityType:
+          $ref: "#/components/schemas/ModelCapabilityType"
+        modelDefinitionId:
+          $ref: "#/components/schemas/StableId"
+        stateVersion:
+          type: integer
+          minimum: 1
+        status:
+          type: string
+          enum: [ACTIVE, SUPERSEDED]
+        createdBy:
+          $ref: "#/components/schemas/StableId"
+        createdAt:
+          $ref: "#/components/schemas/Instant"
+    PlatformDefaultModelRouteListResponse:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          maxItems: 200
+          items:
+            $ref: "#/components/schemas/PlatformDefaultModelRouteView"
+    PlatformDefaultModelRouteView:
+      type: object
+      additionalProperties: false
+      required: [capabilityType, modelDefinitionId, routeBindingId, stateVersion, status, createdAt]
+      properties:
+        capabilityType:
+          $ref: "#/components/schemas/ModelCapabilityType"
+        modelDefinitionId:
+          $ref: "#/components/schemas/StableId"
+        routeBindingId:
+          $ref: "#/components/schemas/StableId"
+        stateVersion:
+          type: integer
+          minimum: 1
+        status:
+          type: string
+          const: ACTIVE
+        createdAt:
+          $ref: "#/components/schemas/Instant"
+
+    ConversationType:
+      type: string
+      enum: [DIRECT, GROUP]
+    ConversationCollaborationMode:
+      type: string
+      enum: [SINGLE_TARGET, PARALLEL_SEPARATE, PRIMARY_SUMMARY]
+    ConversationMemberView:
+      type: object
+      additionalProperties: false
+      required: [userId, displayName, role]
+      properties:
+        userId:
+          $ref: "#/components/schemas/StableId"
+        displayName:
+          type: string
+          minLength: 1
+          maxLength: 100
+        avatarUrl:
+          type: [string, "null"]
+          maxLength: 2048
+        role:
+          type: string
+          enum: [OWNER, MEMBER]
+    ConversationAgentView:
+      type: object
+      additionalProperties: false
+      required: [enterpriseAgentId, displayName, roleName]
+      properties:
+        enterpriseAgentId:
+          $ref: "#/components/schemas/StableId"
+        displayName:
+          type: string
+          minLength: 1
+          maxLength: 100
+        roleName:
+          type: string
+          minLength: 1
+          maxLength: 100
+        avatarUrl:
+          type: [string, "null"]
+          maxLength: 2048
+    ConversationSummary:
+      type: object
+      additionalProperties: false
+      required: [conversationId, type, title, status, membershipVersion, humanMembers, agents, unreadCount, allowedActions]
+      properties:
+        conversationId:
+          $ref: "#/components/schemas/StableId"
+        type:
+          $ref: "#/components/schemas/ConversationType"
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        status:
+          type: string
+          enum: [ACTIVE, DISABLED]
+        membershipVersion:
+          type: integer
+          minimum: 1
+        humanMembers:
+          type: array
+          maxItems: 200
+          items:
+            $ref: "#/components/schemas/ConversationMemberView"
+        agents:
+          type: array
+          maxItems: 20
+          items:
+            $ref: "#/components/schemas/ConversationAgentView"
+        lastMessagePreview:
+          type: [string, "null"]
+          maxLength: 100000
+        lastMessageAt:
+          type: [string, "null"]
+          format: date-time
+        unreadCount:
+          type: integer
+          minimum: 0
+        allowedActions:
+          type: array
+          items:
+            type: string
+            enum: [VIEW, SEND]
+    CreateConversationRequest:
+      type: object
+      additionalProperties: false
+      required: [type, title, participantUserIds, enterpriseAgentIds]
+      properties:
+        type:
+          $ref: "#/components/schemas/ConversationType"
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        participantUserIds:
+          type: array
+          uniqueItems: true
+          maxItems: 200
+          items:
+            $ref: "#/components/schemas/StableId"
+        enterpriseAgentIds:
+          type: array
+          uniqueItems: true
+          maxItems: 20
+          items:
+            $ref: "#/components/schemas/StableId"
+    MessageTargetRequest:
+      type: object
+      additionalProperties: false
+      required: [enterpriseAgentId, triggerType]
+      properties:
+        enterpriseAgentId:
+          $ref: "#/components/schemas/StableId"
+        triggerType:
+          type: string
+          enum: [DIRECT, MENTION, SELECTION, REPLY]
+        replyToMessageId:
+          type: [string, "null"]
+    SendConversationMessageRequest:
+      type: object
+      additionalProperties: false
+      required: [clientMessageId, text, targets, collaborationMode, expectedMembershipVersion]
+      properties:
+        clientMessageId:
+          type: string
+          minLength: 1
+          maxLength: 160
+        text:
+          type: string
+          minLength: 1
+          maxLength: 20000
+        targets:
+          type: array
+          uniqueItems: true
+          maxItems: 20
+          items:
+            $ref: "#/components/schemas/MessageTargetRequest"
+        collaborationMode:
+          $ref: "#/components/schemas/ConversationCollaborationMode"
+        primaryAgentId:
+          type: [string, "null"]
+        replyToMessageId:
+          type: [string, "null"]
+        expectedMembershipVersion:
+          type: integer
+          minimum: 1
+    ConversationMessageView:
+      type: object
+      additionalProperties: false
+      required: [messageId, conversationId, sequenceNo, senderType, senderDisplayName, text, targetAgentIds, chargedPoints, createdAt]
+      properties:
+        messageId:
+          $ref: "#/components/schemas/StableId"
+        conversationId:
+          $ref: "#/components/schemas/StableId"
+        sequenceNo:
+          type: integer
+          minimum: 1
+        senderType:
+          type: string
+          enum: [HUMAN, AGENT, SYSTEM]
+        senderUserId:
+          type: [string, "null"]
+        senderAgentId:
+          type: [string, "null"]
+        senderDisplayName:
+          type: string
+          minLength: 1
+          maxLength: 100
+        senderAvatarUrl:
+          type: [string, "null"]
+        text:
+          type: string
+          minLength: 1
+          maxLength: 100000
+        replyToMessageId:
+          type: [string, "null"]
+        targetAgentIds:
+          type: array
+          uniqueItems: true
+          maxItems: 20
+          items:
+            $ref: "#/components/schemas/StableId"
+        aiStatus:
+          type: [string, "null"]
+          enum: [null, QUEUED, RUNNING, RESPONSE_RECEIVED, USAGE_PENDING, COMPLETED, BLOCKED_CONTEXT, BLOCKED_ACCESS, FAILED_PROVIDER, FAILED_BILLING]
+        knowledgeState:
+          type: [string, "null"]
+          enum: [null, READY, EMPTY, UNAVAILABLE, FORBIDDEN]
+        memoryState:
+          type: [string, "null"]
+          enum: [null, READY, EMPTY, UNAVAILABLE, FORBIDDEN]
+        chargedPoints:
+          $ref: "#/components/schemas/PointValue"
+        createdAt:
+          $ref: "#/components/schemas/Instant"
+    ConversationMessagePage:
+      type: object
+      additionalProperties: false
+      required: [items, upToSequenceNo, hasMore, membershipVersion]
+      properties:
+        items:
+          type: array
+          maxItems: 200
+          items:
+            $ref: "#/components/schemas/ConversationMessageView"
+        upToSequenceNo:
+          type: integer
+          minimum: 0
+        hasMore:
+          type: boolean
+        membershipVersion:
+          type: integer
+          minimum: 1
+    ConversationCommandResponse:
+      type: object
+      additionalProperties: false
+      required: [resource, queuedInvocationIds]
+      properties:
+        resource:
+          $ref: "#/components/schemas/ConversationSummary"
+        queuedInvocationIds:
+          type: array
+          maxItems: 20
+          items:
+            $ref: "#/components/schemas/StableId"
+    ConversationMessageCommandResponse:
+      type: object
+      additionalProperties: false
+      required: [resource, queuedInvocationIds]
+      properties:
+        resource:
+          $ref: "#/components/schemas/ConversationMessageView"
+        queuedInvocationIds:
+          type: array
+          maxItems: 20
+          items:
+            $ref: "#/components/schemas/StableId"
+
+    CreateTaskRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - goal
+        - collaborationMode
+        - targetAgentIds
+        - ownership
+        - maxPointCost
+        - capabilityInput
+      properties:
+        sourceConversationId:
+          oneOf:
+            - $ref: "#/components/schemas/StableId"
+            - type: "null"
+        sourceMessageId:
+          oneOf:
+            - $ref: "#/components/schemas/StableId"
+            - type: "null"
+        expectedMembershipVersion:
+          type: [string, "null"]
+          maxLength: 128
+          description: 群任务必须提交；事务提交前按权威成员版本再次校验。
+        goal:
+          type: string
+          minLength: 1
+          maxLength: 5000
+        constraints:
+          type: array
+          maxItems: 100
+          items:
+            type: string
+            minLength: 1
+            maxLength: 1000
+        inputRefs:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/InputReference"
+        collaborationMode:
+          $ref: "#/components/schemas/CollaborationMode"
+        targetAgentIds:
+          type: array
+          minItems: 1
+          maxItems: 20
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/StableId"
+        primaryAgentId:
+          oneOf:
+            - $ref: "#/components/schemas/StableId"
+            - type: "null"
+          description: PRIMARY_SUMMARY 必填，且必须包含在 targetAgentIds 中；其他模式必须为空。
+        ownership:
+          $ref: "#/components/schemas/TaskOwnership"
+        maxPointCost:
+          $ref: "#/components/schemas/PointValue"
+        capabilityInput:
+          $ref: "#/components/schemas/CapabilityInput"
+        desiredArtifactType:
+          type: [string, "null"]
+          maxLength: 64
+      allOf:
+        - if:
+            properties:
+              collaborationMode:
+                const: SINGLE_TARGET
+          then:
+            properties:
+              targetAgentIds:
+                maxItems: 1
+              primaryAgentId:
+                type: "null"
+        - if:
+            properties:
+              collaborationMode:
+                const: PARALLEL_SEPARATE
+          then:
+            properties:
+              targetAgentIds:
+                minItems: 2
+              primaryAgentId:
+                type: "null"
+        - if:
+            properties:
+              collaborationMode:
+                const: PRIMARY_SUMMARY
+          then:
+            required: [primaryAgentId]
+            properties:
+              targetAgentIds:
+                minItems: 2
+              primaryAgentId:
+                $ref: "#/components/schemas/StableId"
+    CapabilityInput:
+      type: object
+      additionalProperties: false
+      required: [schemaId, schemaVersion, values]
+      description: |
+        由目标员工版本声明并在服务端校验的结构化能力输入。平台内核只保存版本化输入快照，
+        不按报价、合同或出图在 Task 核心中增加专属字段。
+      properties:
+        schemaId:
+          type: string
+          pattern: "^[a-z][a-z0-9_.-]{1,127}$"
+        schemaVersion:
+          type: string
+          minLength: 1
+          maxLength: 64
+        values:
+          type: object
+          additionalProperties: true
+          maxProperties: 200
+    InputReference:
+      type: object
+      additionalProperties: false
+      required: [refType, refId, version]
+      properties:
+        refType:
+          type: string
+          enum: [MESSAGE, ATTACHMENT, ARTIFACT, KNOWLEDGE_DOCUMENT, BUSINESS_OBJECT]
+        refId:
+          $ref: "#/components/schemas/StableId"
+        version:
+          type: string
+          minLength: 1
+          maxLength: 128
+    TaskOwnership:
+      type: object
+      additionalProperties: false
+      required: [ownerUserId, billingScopeType, billingScopeId]
+      properties:
+        ownerUserId:
+          $ref: "#/components/schemas/StableId"
+        projectId:
+          oneOf:
+            - $ref: "#/components/schemas/StableId"
+            - type: "null"
+        billingScopeType:
+          type: string
+          enum: [TENANT, DEPARTMENT, USER, TASK]
+        billingScopeId:
+          $ref: "#/components/schemas/StableId"
+    CollaborationMode:
+      type: string
+      enum: [SINGLE_TARGET, PARALLEL_SEPARATE, PRIMARY_SUMMARY]
+
+    TaskCommandAccepted:
+      type: object
+      additionalProperties: false
+      required: [taskId, taskVersion, status, acceptedAt, statusUrl, eventsUrl, resumeEventId]
+      properties:
+        taskId:
+          $ref: "#/components/schemas/StableId"
+        taskVersion:
+          type: integer
+          minimum: 1
+        status:
+          $ref: "#/components/schemas/TaskStatus"
+        acceptedAt:
+          $ref: "#/components/schemas/Instant"
+        statusUrl:
+          type: string
+          format: uri-reference
+        eventsUrl:
+          type: string
+          format: uri-reference
+        resumeEventId:
+          $ref: "#/components/schemas/EventId"
+
+    TaskSnapshot:
+      type: object
+      additionalProperties: false
+      required:
+        - taskId
+        - taskVersion
+        - title
+        - goal
+        - status
+        - planVersion
+        - collaborationMode
+        - capabilityCode
+        - targetAgentIds
+        - steps
+        - artifacts
+        - pointSummary
+        - businessTrace
+        - allowedActions
+        - resumeEventId
+        - updatedAt
+      properties:
+        taskId:
+          $ref: "#/components/schemas/StableId"
+        taskVersion:
+          type: integer
+          minimum: 1
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        goal:
+          type: string
+          minLength: 1
+          maxLength: 5000
+        status:
+          $ref: "#/components/schemas/TaskStatus"
+        blocker:
+          oneOf:
+            - $ref: "#/components/schemas/TaskBlocker"
+            - type: "null"
+        planVersion:
+          type: integer
+          minimum: 1
+        collaborationMode:
+          $ref: "#/components/schemas/CollaborationMode"
+        capabilityCode:
+          type: string
+          pattern: "^[A-Z][A-Z0-9_]{1,63}$"
+        capabilityView:
+          type: object
+          additionalProperties: true
+          description: |
+            经当前字段权限裁剪后的能力展示投影。报价成本、毛利、合同正文等敏感字段无权时必须缺省，
+            不能先下发再由前端隐藏。
+        targetAgentIds:
+          type: array
+          minItems: 1
+          maxItems: 20
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/StableId"
+        primaryAgentId:
+          oneOf:
+            - $ref: "#/components/schemas/StableId"
+            - type: "null"
+        steps:
+          type: array
+          maxItems: 200
+          items:
+            $ref: "#/components/schemas/TaskStepView"
+        activeRun:
+          oneOf:
+            - $ref: "#/components/schemas/RuntimeRunSummary"
+            - type: "null"
+        artifacts:
+          type: array
+          maxItems: 200
+          items:
+            $ref: "#/components/schemas/TaskArtifactSummary"
+        approval:
+          oneOf:
+            - $ref: "#/components/schemas/ApprovalSummary"
+            - type: "null"
+        delivery:
+          oneOf:
+            - $ref: "#/components/schemas/DeliverySummary"
+            - type: "null"
+        pointSummary:
+          $ref: "#/components/schemas/TaskPointSummary"
+        businessTrace:
+          type: array
+          maxItems: 500
+          items:
+            $ref: "#/components/schemas/BusinessTraceItem"
+        allowedActions:
+          type: array
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/AllowedAction"
+        resumeEventId:
+          $ref: "#/components/schemas/EventId"
+        updatedAt:
+          $ref: "#/components/schemas/Instant"
+    TaskStatus:
+      type: string
+      enum:
+        - DRAFT
+        - PLANNING
+        - WAITING_USER
+        - QUEUED
+        - RUNNING
+        - APPLYING_GUIDANCE
+        - REPLANNING
+        - WAITING_CONFIRMATION
+        - WAITING_APPROVAL
+        - PAUSED
+        - SUCCEEDED
+        - PARTIAL_SUCCESS
+        - FAILED
+        - CANCELLED
+    TaskBlocker:
+      type: object
+      additionalProperties: false
+      required: [code, responsibleParty, message]
+      properties:
+        code:
+          type: string
+          enum:
+            - QUOTA_INSUFFICIENT
+            - BUDGET_EXCEEDED
+            - AUTH_REQUIRED
+            - INPUT_REQUIRED
+            - APPROVAL_REQUIRED
+            - SIDE_EFFECT_RECONCILIATION
+        responsibleParty:
+          type: string
+          enum: [USER, TASK_OWNER, APPROVER, TENANT_ADMIN, PLATFORM_SUPPORT, SYSTEM]
+        message:
+          type: string
+          minLength: 1
+          maxLength: 500
+    TaskStepView:
+      type: object
+      additionalProperties: false
+      required: [stepId, stepKey, title, status, responsibleType, responsibleId, dependsOn, outputContract]
+      properties:
+        stepId:
+          $ref: "#/components/schemas/StableId"
+        stepKey:
+          type: string
+          minLength: 1
+          maxLength: 100
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        status:
+          type: string
+          enum: [PENDING, READY, RUNNING, WAITING_EXTERNAL, RETRY_WAIT, SUCCEEDED, FAILED_FINAL, SKIPPED, CANCELLED, BLOCKED_SIDE_EFFECT_RECONCILIATION]
+        responsibleType:
+          type: string
+          enum: [AGENT, USER, APPROVER, SYSTEM, EXTERNAL]
+        responsibleId:
+          $ref: "#/components/schemas/StableId"
+        dependsOn:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/StableId"
+        outputContract:
+          type: string
+          minLength: 1
+          maxLength: 200
+        blockerCode:
+          type: [string, "null"]
+          maxLength: 64
+    RuntimeRunSummary:
+      type: object
+      additionalProperties: false
+      required: [runtimeRunId, taskStepId, executionGeneration, status, operationKind, startedAt]
+      properties:
+        runtimeRunId:
+          $ref: "#/components/schemas/StableId"
+        taskStepId:
+          $ref: "#/components/schemas/StableId"
+        executionGeneration:
+          type: integer
+          minimum: 1
+        status:
+          type: string
+          enum: [QUEUED, RUNNING, WAITING_USER_INPUT, WAITING_AUTH, PAUSED, CANCEL_REQUESTED, CANCELLING, COMPLETED, FAILED, CANCELLED, CANCEL_OUTCOME_UNKNOWN]
+        operationKind:
+          type: string
+          enum: [START, CONTINUE, RETRY, REPLAN, REPLACE]
+        checkpointId:
+          oneOf:
+            - $ref: "#/components/schemas/StableId"
+            - type: "null"
+        startedAt:
+          $ref: "#/components/schemas/Instant"
+        terminalAt:
+          type: [string, "null"]
+          format: date-time
+    TaskArtifactSummary:
+      type: object
+      additionalProperties: false
+      required: [artifactVersionId, artifactType, title, status, contentHash, sourceStepId, createdAt]
+      properties:
+        artifactVersionId:
+          $ref: "#/components/schemas/StableId"
+        artifactType:
+          type: string
+          minLength: 1
+          maxLength: 64
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        status:
+          $ref: "#/components/schemas/ArtifactStatus"
+        contentHash:
+          type: string
+          minLength: 16
+          maxLength: 128
+        sourceStepId:
+          $ref: "#/components/schemas/StableId"
+        parentArtifactVersionId:
+          oneOf:
+            - $ref: "#/components/schemas/StableId"
+            - type: "null"
+        createdAt:
+          $ref: "#/components/schemas/Instant"
+    ArtifactStatus:
+      type: string
+      enum: [DRAFT, READY, STALE]
+    ApprovalSummary:
+      type: object
+      additionalProperties: false
+      required: [approvalId, artifactVersionId, status, updatedAt]
+      properties:
+        approvalId:
+          $ref: "#/components/schemas/StableId"
+        artifactVersionId:
+          $ref: "#/components/schemas/StableId"
+        status:
+          type: string
+          enum: [PENDING, APPROVED, REJECTED, WITHDRAWN, INVALIDATED]
+        updatedAt:
+          $ref: "#/components/schemas/Instant"
+    DeliverySummary:
+      type: object
+      additionalProperties: false
+      required: [deliveryId, artifactVersionId, status, destinationType, updatedAt]
+      properties:
+        deliveryId:
+          $ref: "#/components/schemas/StableId"
+        artifactVersionId:
+          $ref: "#/components/schemas/StableId"
+        status:
+          type: string
+          enum: [PENDING, SENDING, ACCEPTED, DELIVERED, RETRY_WAIT, FAILED, CANCELLED, UNKNOWN]
+        destinationType:
+          type: string
+          minLength: 1
+          maxLength: 64
+        reasonCode:
+          type: [string, "null"]
+          maxLength: 64
+        updatedAt:
+          $ref: "#/components/schemas/Instant"
+    TaskPointSummary:
+      type: object
+      additionalProperties: false
+      required: [estimatedUpperBound, reserved, captured, released, pendingSettlement]
+      properties:
+        estimatedUpperBound:
+          $ref: "#/components/schemas/PointValue"
+        reserved:
+          $ref: "#/components/schemas/PointValue"
+        captured:
+          $ref: "#/components/schemas/PointValue"
+        released:
+          $ref: "#/components/schemas/PointValue"
+        pendingSettlement:
+          $ref: "#/components/schemas/PointValue"
+    BusinessTraceItem:
+      type: object
+      additionalProperties: false
+      description: 业务轨迹白名单；禁止承载模型思维链、系统提示词、密钥和无权正文。
+      required: [traceItemId, type, occurredAt, summary]
+      properties:
+        traceItemId:
+          $ref: "#/components/schemas/StableId"
+        type:
+          type: string
+          enum: [GOAL_CONFIRMED, PLAN_CREATED, STEP_STARTED, STEP_COMPLETED, EVIDENCE_USED, TOOL_RESULT, CHECKPOINT_OPENED, CHECKPOINT_RESOLVED, ARTIFACT_CREATED, COST_UPDATED, CONTROL_APPLIED, FAILURE]
+        occurredAt:
+          $ref: "#/components/schemas/Instant"
+        responsibleType:
+          type: [string, "null"]
+          enum: [AGENT, USER, APPROVER, SYSTEM, EXTERNAL, null]
+        responsibleId:
+          oneOf:
+            - $ref: "#/components/schemas/StableId"
+            - type: "null"
+        summary:
+          type: string
+          minLength: 1
+          maxLength: 1000
+        referenceIds:
+          type: array
+          maxItems: 50
+          items:
+            $ref: "#/components/schemas/StableId"
+    AllowedAction:
+      type: string
+      enum:
+        - VIEW
+        - START_WORK
+        - ADD_CONTEXT
+        - CORRECT_FACT
+        - CHANGE_CONSTRAINT
+        - CHANGE_GOAL
+        - STYLE_GUIDANCE
+        - ANSWER_CHECKPOINT
+        - PAUSE
+        - RESUME
+        - CANCEL
+        - RETRY_FROM_STEP
+        - SELECT_ARTIFACT
+        - SUBMIT_APPROVAL
+        - APPROVE
+        - REJECT
+        - DOWNLOAD
+
+    SseEventEnvelope:
+      type: object
+      additionalProperties: false
+      required: [schemaVersion, eventId, streamType, streamId, eventType, aggregateType, aggregateId, aggregateVersion, occurredAt, visibilityVersion, traceId, payload]
+      properties:
+        schemaVersion:
+          type: integer
+          const: 1
+        eventId:
+          $ref: "#/components/schemas/EventId"
+        streamType:
+          type: string
+          enum: [OFFICE_USER, CONVERSATION, TASK]
+        streamId:
+          $ref: "#/components/schemas/StableId"
+        eventType:
+          type: string
+          pattern: "^[a-z][a-z0-9_.-]{2,127}$"
+        aggregateType:
+          type: string
+          enum: [OFFICE, CONVERSATION, TASK, TASK_STEP, ARTIFACT, APPROVAL, DELIVERY, POINT_ACCOUNT, AGENT_INVOCATION, STREAM]
+        aggregateId:
+          $ref: "#/components/schemas/StableId"
+        aggregateVersion:
+          type: integer
+          minimum: 0
+        occurredAt:
+          $ref: "#/components/schemas/Instant"
+        visibilityVersion:
+          type: string
+          minLength: 1
+          maxLength: 128
+        traceId:
+          type: string
+          minLength: 1
+          maxLength: 128
+        payload:
+          type: object
+          additionalProperties: true
+
+    ProblemDetail:
+      type: object
+      additionalProperties: false
+      required: [type, title, status, detail, code, traceId, retryable, action]
+      properties:
+        type:
+          type: string
+          format: uri
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        status:
+          type: integer
+          minimum: 400
+          maximum: 599
+        detail:
+          type: string
+          minLength: 1
+          maxLength: 1000
+        instance:
+          type: [string, "null"]
+          format: uri-reference
+        code:
+          type: string
+          pattern: "^[A-Z][A-Z0-9_]{2,127}$"
+        traceId:
+          type: string
+          minLength: 1
+          maxLength: 128
+        retryable:
+          type: boolean
+        action:
+          type: string
+          enum:
+            - NONE
+            - REAUTHENTICATE
+            - RETRY_LOGIN
+            - RETURN_SAFE_PAGE
+            - REFRESH_SESSION
+            - REFRESH_OFFICE
+            - REFRESH_TASK
+            - REFRESH_CONVERSATION
+            - REFRESH_RESOURCE
+            - SELECT_TARGET
+            - SELECT_MODE
+            - SELECT_PRIMARY_AGENT
+            - CONTACT_POINT_ADMIN
+            - CONTACT_ADMIN
+            - RETRY_LATER
+            - CREATE_NEW_INTENT
+        errors:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/FieldError"
+    FieldError:
+      type: object
+      additionalProperties: false
+      required: [field, code, message]
+      properties:
+        field:
+          type: string
+          minLength: 1
+          maxLength: 200
+        code:
+          type: string
+          pattern: "^[A-Z][A-Z0-9_]{2,127}$"
+        message:
+          type: string
+          minLength: 1
+          maxLength: 500

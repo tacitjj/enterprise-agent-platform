@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "status": "poc-candidate",
+  "auditedAt": "2026-08-12",
+  "repository": "https://github.com/bytedance/deer-flow.git",
+  "commit": "88252e9b318d34e7e1867155ad2c77993320788e",
+  "referenceRelease": {
+    "tag": "v2.0.0",
+    "commit": "7e7f0410797693cf882594555ba414e0361d4c6f"
+  },
+  "license": "MIT",
+  "python": "3.12",
+  "upstreamLockFile": "backend/uv.lock",
+  "packages": {
+    "deer-flow": "2.1.0",
+    "deerflow-harness": "2.1.0",
+    "deerflow-extension-api": "0.1.1"
+  },
+  "integrationMode": "gateway-runtime-kernel-behind-dianlian-adapter",
+  "memoryPolicy": {
+    "enabled": false,
+    "injectionEnabled": false,
+    "managerClass": "noop"
+  },
+  "productionApproved": false,
+  "requiredGates": [
+    "upstream-compatibility",
+    "run-ownership-and-takeover",
+    "cancel-complete-race",
+    "event-replay-and-gap",
+    "scope-isolation",
+    "sandbox-policy",
+    "usage-and-artifact-idempotency"
+  ]
+}

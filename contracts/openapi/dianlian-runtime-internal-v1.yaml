@@ -1,0 +1,637 @@
+openapi: 3.1.0
+info:
+  title: Dianlian AI Runtime Internal API
+  version: 1.2.0
+  description: >-
+    Internal anti-corruption contract for Java-authorized context retrieval and
+    fenced derived-context indexing. This API never computes business authorization,
+    owns business truth, or returns model answers.
+servers:
+  - url: http://127.0.0.1:8091
+    description: Local development only
+paths:
+  /internal/v1/retrieval/search:
+    post:
+      operationId: retrieveAuthorizedContext
+      summary: Retrieve evidence within Java-authorized knowledge and memory allowlists
+      security:
+        - InternalServiceBearer: []
+      x-required-scopes: [context.retrieve]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ContextRetrievalRequest"
+      responses:
+        "200":
+          description: Authorized retrieval completed; individual sources may be empty
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContextBundle"
+        "401":
+          description: Dedicated Service JWT is missing, invalid, expired, or is a user token
+          headers:
+            WWW-Authenticate:
+              schema:
+                type: string
+                const: Bearer
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceUnavailableResponse"
+        "403":
+          description: Valid Service JWT does not grant context.retrieve
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceUnavailableResponse"
+        "422":
+          description: Strict contract validation failed
+        "503":
+          description: >-
+            Service JWT verification is unavailable, context is disabled, migrations
+            are not ready, or no production retriever is connected
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceUnavailableResponse"
+  /internal/v1/indexing/apply:
+    post:
+      operationId: applyContextProjection
+      summary: Apply one ordered lexical or vector projection event
+      security:
+        - InternalServiceBearer: []
+      x-required-scopes: [context.index.write]
+      description: >-
+        Java remains authoritative for job leases and resource truth. The runtime
+        orders derived projections by authority, tenant, logical resource and index
+        profile. eventSequence is the persistence fence: lower events are stale,
+        identical events are idempotent, and DELETE wins over UPSERT at the same
+        sequence. A DELETE tombstone prevents an older UPSERT from reviving data.
+        jobId and leaseEpoch are echoed so Java can reject a stale worker receipt.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ContextIndexingRequest"
+      responses:
+        "200":
+          description: Projection applied or safely ignored as idempotent or stale
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContextIndexingReceipt"
+        "401":
+          description: Dedicated Service JWT is missing, invalid, expired, or is a user token
+          headers:
+            WWW-Authenticate:
+              schema:
+                type: string
+                const: Bearer
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceUnavailableResponse"
+        "403":
+          description: Valid Service JWT does not grant context.index.write
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceUnavailableResponse"
+        "409":
+          description: Same-sequence UPSERT has a different payload or profile is unsupported
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceUnavailableResponse"
+        "422":
+          description: Strict contract or conditional field validation failed
+        "503":
+          description: >-
+            Service JWT verification or context storage is unavailable, or VECTOR has
+            no production embedding provider. INDEX_PROVIDER_NOT_CONFIGURED is a
+            stable retryable service code.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceUnavailableResponse"
+components:
+  securitySchemes:
+    InternalServiceBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >-
+        Dedicated RS256 Service JWT only. issuer=dianlian-platform,
+        audience=dianlian-ai-runtime, TTL at most 60 seconds, and kid is required.
+        Public user access tokens and DIANLIAN_JWT_SECRET are never accepted.
+  schemas:
+    ContextIndexingRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - contractVersion
+        - requestId
+        - traceId
+        - jobId
+        - leaseEpoch
+        - target
+        - operation
+        - authorityScope
+        - resourceType
+        - resourceId
+        - eventSequence
+        - indexProfile
+      properties:
+        contractVersion:
+          type: string
+          const: "1.0"
+        requestId:
+          type: string
+          format: uuid
+        traceId:
+          type: string
+          format: uuid
+        jobId:
+          type: string
+          format: uuid
+        leaseEpoch:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Java-owned lease fence token, echoed unchanged in the receipt.
+        target:
+          $ref: "#/components/schemas/IndexTarget"
+        operation:
+          $ref: "#/components/schemas/IndexOperation"
+        authorityScope:
+          $ref: "#/components/schemas/AuthorityScope"
+        tenantId:
+          type: [string, "null"]
+          format: uuid
+          description: Required for TENANT and null for PLATFORM.
+        resourceType:
+          $ref: "#/components/schemas/IndexResourceType"
+        resourceId:
+          type: string
+          format: uuid
+          description: >-
+            Stable projection identity used only by the fence and DELETE. For
+            knowledge this is the documentVersionId from the Java index job.
+        sourceId:
+          type: [string, "null"]
+          format: uuid
+          description: >-
+            Required for UPSERT and used for citation/authorization matching. For
+            knowledge this is documentId; for memory it equals resourceId.
+        sourceVersion:
+          type: [string, "null"]
+          minLength: 1
+          maxLength: 200
+          description: >-
+            Required for UPSERT. Knowledge uses documentVersionId and memory uses
+            positive versionNo. DELETE needs neither source field.
+        eventSequence:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Monotonic ordering fence for this logical resource/profile.
+        indexProfile:
+          type: string
+          pattern: '^[a-z0-9][a-z0-9._-]{0,99}$'
+          description: V1 production profile is context-default-v1.
+        title:
+          type: [string, "null"]
+          minLength: 1
+          maxLength: 500
+        normalizedText:
+          type: [string, "null"]
+          minLength: 1
+          maxLength: 2000000
+          description: Required for UPSERT; exact normalized input to the fixed splitter profile.
+        sourceContentHash:
+          type: [string, "null"]
+          pattern: '^[0-9a-f]{64,128}$'
+          description: >-
+            Required for knowledge UPSERT and optional for memory UPSERT. This is the
+            64-to-128 lowercase-hex authority source hash; it is not substituted by
+            the normalized-text hash.
+        normalizedTextHash:
+          type: [string, "null"]
+          pattern: '^[0-9a-f]{64}$'
+          description: >-
+            Required for UPSERT and must equal SHA-256 of the exact normalizedText
+            UTF-8 bytes.
+        normalizationProfileVersion:
+          type: [string, "null"]
+          pattern: '^[a-z0-9][a-z0-9._-]{0,99}$'
+          description: >-
+            Required for UPSERT. Knowledge carries its trusted normalization snapshot;
+            memory uses memory-authority-v1 in B1.
+        citation:
+          type: [string, "null"]
+          minLength: 1
+          maxLength: 1000
+        memoryScope:
+          oneOf:
+            - $ref: "#/components/schemas/MemoryProjectionScope"
+            - type: "null"
+      description: >-
+        UPSERT requires sourceId, sourceVersion, title, normalizedText,
+        normalizedTextHash, normalizationProfileVersion and citation. Knowledge
+        additionally requires sourceContentHash; memory may omit it and additionally
+        requires memoryScope. resourceId is deliberately separate from sourceId:
+        it is the stable projection/delete key, while source fields drive exact
+        citation and authorization matching.
+        DELETE forbids all content and memory-scope fields. PLATFORM accepts only
+        knowledge resources and must not include tenantId. LEXICAL is implemented in
+        B1; VECTOR is contract-stable but fails with INDEX_PROVIDER_NOT_CONFIGURED
+        until a production embedding provider is configured.
+    ContextIndexingReceipt:
+      type: object
+      additionalProperties: false
+      required:
+        - contractVersion
+        - requestId
+        - jobId
+        - leaseEpoch
+        - target
+        - operation
+        - result
+        - eventSequence
+        - indexedChunkCount
+        - indexProfile
+      properties:
+        contractVersion:
+          type: string
+          const: "1.0"
+        requestId:
+          type: string
+          format: uuid
+        jobId:
+          type: string
+          format: uuid
+        leaseEpoch:
+          type: integer
+          format: int64
+          minimum: 1
+        target:
+          $ref: "#/components/schemas/IndexTarget"
+        operation:
+          $ref: "#/components/schemas/IndexOperation"
+        result:
+          type: string
+          enum: [APPLIED, NOOP_IDEMPOTENT, NOOP_STALE]
+        eventSequence:
+          type: integer
+          format: int64
+          minimum: 1
+        indexedChunkCount:
+          type: integer
+          minimum: 0
+        indexProfile:
+          type: string
+          minLength: 1
+          maxLength: 100
+    MemoryProjectionScope:
+      type: object
+      additionalProperties: false
+      required: [enterpriseAgentId, scopeType, scopeId]
+      properties:
+        enterpriseAgentId:
+          type: string
+          format: uuid
+        scopeType:
+          $ref: "#/components/schemas/MemoryScopeType"
+        scopeId:
+          type: string
+          format: uuid
+        sourceMessageSequenceNo:
+          type: [integer, "null"]
+          format: int64
+          minimum: 0
+          description: >-
+            May be null during the B1 producer transition. GROUP_AGENT rows without
+            this sequence are stored but always excluded from retrieval.
+    IndexTarget:
+      type: string
+      enum: [LEXICAL, VECTOR]
+    IndexOperation:
+      type: string
+      enum: [UPSERT, DELETE]
+    AuthorityScope:
+      type: string
+      enum: [PLATFORM, TENANT]
+    IndexResourceType:
+      type: string
+      enum: [KNOWLEDGE_DOCUMENT_VERSION, MEMORY_ITEM_VERSION]
+    ContextRetrievalRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - contractVersion
+        - requestId
+        - traceId
+        - deadlineAt
+        - tenantId
+        - actorUserId
+        - enterpriseAgentId
+        - conversationId
+        - query
+        - audienceUserIds
+        - authorizedKnowledgeResources
+        - allowedMemoryScopes
+        - requestedSources
+        - policy
+        - authorizationSnapshotHash
+      properties:
+        contractVersion:
+          type: string
+          pattern: '^1\.[0-9]+$'
+        requestId:
+          type: string
+          format: uuid
+        traceId:
+          type: string
+          format: uuid
+        deadlineAt:
+          type: string
+          format: date-time
+        tenantId:
+          type: string
+          format: uuid
+        actorUserId:
+          type: string
+          format: uuid
+        enterpriseAgentId:
+          type: string
+          format: uuid
+        conversationId:
+          type: string
+          format: uuid
+        query:
+          type: string
+          minLength: 1
+          maxLength: 20000
+        audienceUserIds:
+          type: array
+          minItems: 1
+          maxItems: 500
+          uniqueItems: true
+          items:
+            type: string
+            format: uuid
+        authorizedKnowledgeResources:
+          type: array
+          maxItems: 2000
+          items:
+            $ref: "#/components/schemas/AuthorizedKnowledgeResource"
+        allowedMemoryScopes:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/AllowedMemoryScope"
+        requestedSources:
+          type: array
+          minItems: 1
+          maxItems: 2
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/RequestedSource"
+        policy:
+          $ref: "#/components/schemas/RetrievalPolicy"
+        authorizationSnapshotHash:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+      description: >-
+        Every requested source must have a non-empty explicit allowlist. Tenant and
+        enterprise-agent identifiers in nested authorization entries must match the
+        top-level request. Implementations must never interpret an empty allowlist as
+        unrestricted retrieval. B0 accepts only AGENT, USER_AGENT and GROUP_AGENT
+        memory scopes; adding another scope requires an explicit contract revision.
+    AuthorizedKnowledgeResource:
+      type: object
+      additionalProperties: false
+      required: [tenantId, resourceId, resourceVersionId]
+      properties:
+        tenantId:
+          type: string
+          format: uuid
+        resourceId:
+          type: string
+          format: uuid
+        resourceVersionId:
+          type: string
+          format: uuid
+    AllowedMemoryScope:
+      type: object
+      additionalProperties: false
+      required:
+        - tenantId
+        - scopeType
+        - scopeId
+        - enterpriseAgentId
+        - historyFloorSequenceNo
+      properties:
+        tenantId:
+          type: string
+          format: uuid
+        scopeType:
+          $ref: "#/components/schemas/MemoryScopeType"
+        scopeId:
+          type: string
+          format: uuid
+        enterpriseAgentId:
+          type: string
+          format: uuid
+        historyFloorSequenceNo:
+          type: integer
+          format: int64
+          minimum: 0
+    RetrievalPolicy:
+      type: object
+      additionalProperties: false
+      required:
+        - lexicalTopK
+        - vectorTopK
+        - rerankTopK
+        - maxEvidence
+        - maxContextTokens
+      properties:
+        lexicalTopK:
+          type: integer
+          minimum: 1
+          maximum: 100
+        vectorTopK:
+          type: integer
+          minimum: 1
+          maximum: 100
+        rerankTopK:
+          type: integer
+          minimum: 1
+          maximum: 100
+        maxEvidence:
+          type: integer
+          minimum: 1
+          maximum: 100
+        maxContextTokens:
+          type: integer
+          minimum: 128
+          maximum: 131072
+      description: >-
+        rerankTopK cannot exceed lexicalTopK plus vectorTopK, and maxEvidence
+        cannot exceed rerankTopK.
+    RequestedSource:
+      type: string
+      enum: [KNOWLEDGE, MEMORY]
+    MemoryScopeType:
+      type: string
+      enum: [AGENT, USER_AGENT, GROUP_AGENT]
+    ContextBundle:
+      type: object
+      additionalProperties: false
+      required:
+        - contractVersion
+        - requestId
+        - retrievalSnapshotId
+        - generatedAt
+        - knowledge
+        - memory
+        - retrievalTrace
+      properties:
+        contractVersion:
+          type: string
+          pattern: '^1\.[0-9]+$'
+        requestId:
+          type: string
+          format: uuid
+        retrievalSnapshotId:
+          type: string
+          minLength: 1
+          maxLength: 200
+        generatedAt:
+          type: string
+          format: date-time
+        knowledge:
+          $ref: "#/components/schemas/ContextSourceBundle"
+        memory:
+          $ref: "#/components/schemas/ContextSourceBundle"
+        retrievalTrace:
+          $ref: "#/components/schemas/RetrievalTrace"
+    ContextSourceBundle:
+      type: object
+      additionalProperties: false
+      required: [state, evidence]
+      properties:
+        state:
+          type: string
+          enum: [READY, EMPTY, UNAVAILABLE, FORBIDDEN]
+        reasonCode:
+          type: [string, "null"]
+          maxLength: 128
+        evidence:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/ContextEvidence"
+      description: >-
+        READY requires evidence and no reasonCode. Every non-ready state requires
+        an empty evidence array and a non-blank reasonCode.
+    ContextEvidence:
+      type: object
+      additionalProperties: false
+      required:
+        - evidenceId
+        - sourceType
+        - sourceId
+        - sourceVersion
+        - chunkId
+        - title
+        - excerpt
+        - contentHash
+        - score
+        - citation
+      properties:
+        evidenceId:
+          type: string
+          minLength: 1
+          maxLength: 200
+        sourceType:
+          $ref: "#/components/schemas/RequestedSource"
+        sourceId:
+          type: string
+          format: uuid
+        sourceVersion:
+          type: string
+          minLength: 1
+          maxLength: 200
+        chunkId:
+          type: string
+          minLength: 1
+          maxLength: 200
+        title:
+          type: string
+          minLength: 1
+          maxLength: 500
+        excerpt:
+          type: string
+          minLength: 1
+          maxLength: 2000
+        contentHash:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        score:
+          type: number
+          minimum: 0
+          maximum: 1
+        citation:
+          type: string
+          minLength: 1
+          maxLength: 1000
+      description: >-
+        MEMORY evidence retains the authoritative sourceId and sourceVersion. Java
+        must perform the final current-version/deletion fence before placing evidence
+        in a model prompt; the projection lookup alone does not eliminate a concurrent
+        forget/delete race.
+    RetrievalTrace:
+      type: object
+      additionalProperties: false
+      required: [strategies, candidateCount, rerankedCount, indexVersion, elapsedMs]
+      properties:
+        strategies:
+          type: array
+          minItems: 1
+          maxItems: 10
+          items:
+            type: string
+            minLength: 1
+          description: Only strategies actually executed may be reported; B1 PostgreSQL returns LEXICAL.
+        candidateCount:
+          type: integer
+          minimum: 0
+        rerankedCount:
+          type: integer
+          minimum: 0
+        indexVersion:
+          type: string
+          minLength: 1
+          maxLength: 200
+        elapsedMs:
+          type: integer
+          minimum: 0
+    ServiceUnavailableResponse:
+      type: object
+      additionalProperties: false
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          minLength: 1
+          maxLength: 128
+        message:
+          type: string
+          minLength: 1
+          maxLength: 500

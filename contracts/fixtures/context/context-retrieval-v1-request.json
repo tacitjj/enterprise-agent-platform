@@ -1,0 +1,46 @@
+{
+  "contractVersion": "1.0",
+  "requestId": "00000000-0000-0000-0000-000000000901",
+  "traceId": "00000000-0000-0000-0000-000000000902",
+  "deadlineAt": "2099-01-01T00:00:00Z",
+  "tenantId": "00000000-0000-0000-0000-000000000001",
+  "actorUserId": "00000000-0000-0000-0000-000000000011",
+  "enterpriseAgentId": "00000000-0000-0000-0000-000000000121",
+  "conversationId": "00000000-0000-0000-0000-000000000201",
+  "query": "请根据已授权资料整理风险点",
+  "audienceUserIds": [
+    "00000000-0000-0000-0000-000000000011"
+  ],
+  "authorizedKnowledgeResources": [
+    {
+      "tenantId": "00000000-0000-0000-0000-000000000001",
+      "resourceId": "00000000-0000-0000-0000-000000000401",
+      "resourceVersionId": "00000000-0000-0000-0000-000000000402"
+    }
+  ],
+  "allowedMemoryScopes": [
+    {
+      "tenantId": "00000000-0000-0000-0000-000000000001",
+      "scopeType": "AGENT",
+      "scopeId": "00000000-0000-0000-0000-000000000121",
+      "enterpriseAgentId": "00000000-0000-0000-0000-000000000121",
+      "historyFloorSequenceNo": 7
+    },
+    {
+      "tenantId": "00000000-0000-0000-0000-000000000001",
+      "scopeType": "USER_AGENT",
+      "scopeId": "00000000-0000-0000-0000-000000000011",
+      "enterpriseAgentId": "00000000-0000-0000-0000-000000000121",
+      "historyFloorSequenceNo": 7
+    }
+  ],
+  "requestedSources": ["KNOWLEDGE", "MEMORY"],
+  "policy": {
+    "lexicalTopK": 20,
+    "vectorTopK": 20,
+    "rerankTopK": 20,
+    "maxEvidence": 8,
+    "maxContextTokens": 4096
+  },
+  "authorizationSnapshotHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+}

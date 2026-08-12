@@ -1,0 +1,134 @@
+server:
+  port: ${SERVER_PORT:8080}
+  shutdown: graceful
+
+spring:
+  application:
+    name: dianlian-platform
+  lifecycle:
+    timeout-per-shutdown-phase: 30s
+  datasource:
+    url: ${DIANLIAN_DB_URL}
+    username: ${DIANLIAN_DB_USERNAME}
+    password: ${DIANLIAN_DB_PASSWORD}
+    hikari:
+      pool-name: dianlian-business-pool
+      maximum-pool-size: ${DIANLIAN_DB_POOL_MAX_SIZE:10}
+      minimum-idle: ${DIANLIAN_DB_POOL_MIN_IDLE:2}
+      connection-timeout: 3000
+      validation-timeout: 2000
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    default-schema: dianlian_business
+    schemas: dianlian_business
+    create-schemas: true
+    validate-on-migrate: true
+    clean-disabled: true
+    baseline-on-migrate: false
+    out-of-order: false
+  sql:
+    init:
+      mode: never
+  jackson:
+    deserialization:
+      fail-on-unknown-properties: true
+  data:
+    redis:
+      host: ${DIANLIAN_REDIS_HOST:127.0.0.1}
+      port: ${DIANLIAN_REDIS_PORT:6379}
+      password: ${DIANLIAN_REDIS_PASSWORD:}
+      timeout: 2s
+
+sa-token:
+  token-name: Authorization
+  token-prefix: Bearer
+  timeout: ${DIANLIAN_ACCESS_TOKEN_TTL_SECONDS:900}
+  active-timeout: -1
+  is-concurrent: true
+  is-share: false
+  is-read-header: true
+  is-read-cookie: false
+  is-read-body: false
+  is-write-header: false
+  auto-renew: false
+  jwt-secret-key: ${DIANLIAN_JWT_SECRET}
+
+dianlian:
+  internal-service-jwt:
+    enabled: ${DIANLIAN_SERVICE_JWT_ENABLED:false}
+    key-id: ${DIANLIAN_SERVICE_JWT_KEY_ID:}
+    private-key-path: ${DIANLIAN_SERVICE_JWT_PRIVATE_KEY_PATH:}
+    ttl-seconds: ${DIANLIAN_SERVICE_JWT_TTL_SECONDS:30}
+  context-index-worker:
+    enabled: ${DIANLIAN_CONTEXT_INDEX_WORKER_ENABLED:false}
+    base-url: ${DIANLIAN_CONTEXT_INDEX_BASE_URL:}
+    connect-timeout: ${DIANLIAN_CONTEXT_INDEX_CONNECT_TIMEOUT:2s}
+    read-timeout: ${DIANLIAN_CONTEXT_INDEX_READ_TIMEOUT:20s}
+    lease-duration: ${DIANLIAN_CONTEXT_INDEX_LEASE_DURATION:60s}
+    poll-delay-ms: ${DIANLIAN_CONTEXT_INDEX_POLL_DELAY_MS:1000}
+    allow-loopback-http: ${DIANLIAN_CONTEXT_INDEX_ALLOW_LOOPBACK_HTTP:false}
+  context-retrieval-client:
+    enabled: ${DIANLIAN_CONTEXT_RETRIEVAL_ENABLED:false}
+    base-url: ${DIANLIAN_CONTEXT_RETRIEVAL_BASE_URL:}
+    connect-timeout: ${DIANLIAN_CONTEXT_RETRIEVAL_CONNECT_TIMEOUT:2s}
+    read-timeout: ${DIANLIAN_CONTEXT_RETRIEVAL_READ_TIMEOUT:15s}
+    allow-loopback-http: ${DIANLIAN_CONTEXT_RETRIEVAL_ALLOW_LOOPBACK_HTTP:false}
+  model:
+    allowed-hosts: ${DIANLIAN_MODEL_ALLOWED_HOSTS:}
+  interaction:
+    worker-enabled: ${DIANLIAN_INTERACTION_WORKER_ENABLED:false}
+    worker-delay-ms: ${DIANLIAN_INTERACTION_WORKER_DELAY_MS:1000}
+  task:
+    worker-enabled: ${DIANLIAN_TASK_WORKER_ENABLED:false}
+    worker-delay-ms: ${DIANLIAN_TASK_WORKER_DELAY_MS:1000}
+  authentication:
+    access-token-seconds: ${DIANLIAN_ACCESS_TOKEN_TTL_SECONDS:900}
+    refresh-token-seconds: ${DIANLIAN_REFRESH_TOKEN_TTL_SECONDS:2592000}
+    refresh-cookie-name: __Host-DIANLIAN-REFRESH
+    refresh-cookie-secure: true
+    refresh-cookie-same-site: Strict
+  platform:
+    process-role: API
+
+runtime:
+  enabled: false
+
+mybatis-plus:
+  global-config:
+    banner: false
+  configuration:
+    map-underscore-to-camel-case: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+        add-additional-paths: true
+      show-details: when-authorized
+      group:
+        liveness:
+          include: livenessState
+        readiness:
+          include: readinessState,db,redis
+        dependencies:
+          include: redis,pythonRuntime
+          show-details: when-authorized
+  health:
+    livenessstate:
+      enabled: true
+    readinessstate:
+      enabled: true
+  info:
+    env:
+      enabled: true
+
+info:
+  app:
+    name: ${spring.application.name}
+    process-role: ${dianlian.platform.process-role}

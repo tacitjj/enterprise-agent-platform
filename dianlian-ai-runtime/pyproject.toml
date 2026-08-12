@@ -1,0 +1,33 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "dianlian-ai-runtime"
+version = "0.1.0"
+description = "Dianlian AI runtime anti-corruption API"
+readme = "README.md"
+requires-python = ">=3.12,<3.15"
+dependencies = [
+  "fastapi==0.139.2",
+  "llama-index-core==0.14.22",
+  "psycopg[binary,pool]>=3.2,<4",
+  "PyJWT[crypto]==2.13.0",
+  "uvicorn[standard]>=0.35,<1",
+]
+
+[project.scripts]
+dianlian-context-migrate = "dianlian_runtime.migrations:main"
+
+[dependency-groups]
+dev = [
+  "httpx2>=2.10,<3",
+  "pytest>=8.4,<10",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/dianlian_runtime"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

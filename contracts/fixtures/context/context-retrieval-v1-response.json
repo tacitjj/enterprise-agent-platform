@@ -1,0 +1,36 @@
+{
+  "contractVersion": "1.0",
+  "requestId": "00000000-0000-0000-0000-000000000901",
+  "retrievalSnapshotId": "retrieval-snapshot-0001",
+  "generatedAt": "2026-08-12T08:00:00Z",
+  "knowledge": {
+    "state": "READY",
+    "reasonCode": null,
+    "evidence": [
+      {
+        "evidenceId": "knowledge-evidence-0001",
+        "sourceType": "KNOWLEDGE",
+        "sourceId": "00000000-0000-0000-0000-000000000401",
+        "sourceVersion": "00000000-0000-0000-0000-000000000402",
+        "chunkId": "chunk-0001",
+        "title": "测试知识文档",
+        "excerpt": "这是一段不含真实业务数据的授权证据。",
+        "contentHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "score": 0.91,
+        "citation": "测试知识文档 / chunk-0001"
+      }
+    ]
+  },
+  "memory": {
+    "state": "EMPTY",
+    "reasonCode": "MEMORY_NO_CONFIRMED_EVIDENCE",
+    "evidence": []
+  },
+  "retrievalTrace": {
+    "strategies": ["LEXICAL", "VECTOR", "RERANK"],
+    "candidateCount": 24,
+    "rerankedCount": 8,
+    "indexVersion": "index-v1",
+    "elapsedMs": 38
+  }
+}

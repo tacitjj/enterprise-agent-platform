@@ -1,0 +1,41 @@
+name: dianlian-local
+
+services:
+  postgres:
+    image: ${DIANLIAN_POSTGRES_IMAGE:-pgvector/pgvector:0.8.5-pg17}
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DIANLIAN_POSTGRES_DB:-dianlian}
+      POSTGRES_USER: ${DIANLIAN_POSTGRES_USER:-dianlian_app}
+      POSTGRES_PASSWORD: ${DIANLIAN_POSTGRES_PASSWORD:?set DIANLIAN_POSTGRES_PASSWORD in deploy/local/.env}
+    ports:
+      - "127.0.0.1:${DIANLIAN_POSTGRES_PORT:-55432}:5432"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    volumes:
+      - dianlian_postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: ${DIANLIAN_REDIS_IMAGE:-redis:7.4-alpine}
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "127.0.0.1:${DIANLIAN_REDIS_PORT:-56379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    volumes:
+      - dianlian_redis_data:/data
+
+volumes:
+  dianlian_postgres_data:
+  dianlian_redis_data:
