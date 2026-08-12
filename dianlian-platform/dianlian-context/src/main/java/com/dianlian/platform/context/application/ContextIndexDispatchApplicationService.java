@@ -30,7 +30,7 @@ import org.springframework.transaction.annotation.Transactional;
  * External indexing must happen only after this method returns.
  */
 @Service
-public final class ContextIndexDispatchApplicationService implements ContextIndexDispatch {
+public class ContextIndexDispatchApplicationService implements ContextIndexDispatch {
 
     static final int MAX_ATTEMPTS = 8;
     private static final Duration INITIAL_RETRY_DELAY = Duration.ofSeconds(15);
