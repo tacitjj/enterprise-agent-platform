@@ -116,8 +116,8 @@ env JAVA_HOME=/path/to/java-21 mvn -f dianlian-platform/pom.xml test
 cd dianlian-web
 npm ci
 npm test
-npm run test:sites
 npm run build
+npm run test:sites
 
 cd ../dianlian-ai-runtime
 uv sync --frozen

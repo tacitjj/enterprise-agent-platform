@@ -15,6 +15,6 @@
 
 - Java：运行受影响 Maven 模块的测试。
 - Python：在 `dianlian-ai-runtime` 中运行 `uv run pytest`。
-- Web：在 `dianlian-web` 中运行 `npm test` 和 `npm run build`。
+- Web：在 `dianlian-web` 中依次运行 `npm test`、`npm run build` 和 `npm run test:sites`。
 
 请在 Pull Request 中写明实际执行的检查和仍未覆盖的风险。

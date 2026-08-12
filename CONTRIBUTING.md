@@ -44,8 +44,8 @@ uv run pytest
 cd dianlian-web
 npm ci
 npm test
-npm run test:sites
 npm run build
+npm run test:sites
 ```
 
 ## Pull requests
