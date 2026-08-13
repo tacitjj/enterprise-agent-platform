@@ -19,7 +19,11 @@ from dianlian_runtime.config import RuntimeSettings
 KEY_ID = "service-test-current"
 
 
-def _settings(public_key_ring_json: str | None) -> RuntimeSettings:
+def _settings(
+    public_key_ring_json: str | None,
+    *,
+    permit_authorizer_enabled: bool = False,
+) -> RuntimeSettings:
     return RuntimeSettings(
         service_name="dianlian-ai-runtime",
         service_version="test",
@@ -27,6 +31,7 @@ def _settings(public_key_ring_json: str | None) -> RuntimeSettings:
         context_enabled=False,
         agent_enabled=False,
         supervisor_enabled=False,
+        permit_authorizer_enabled=permit_authorizer_enabled,
         service_jwt_public_key_ring_json=public_key_ring_json,
     )
 
@@ -65,11 +70,35 @@ def _token(private_key, claims: dict[str, object], *, key_id: str = KEY_ID) -> s
     )
 
 
-def _client(tmp_path: Path):
+def _client(tmp_path: Path, *, permit_authorizer_enabled: bool = False):
     public_key_path = tmp_path / "temporary-public-key.pem"
     private_key = _key_pair(public_key_path)
     ring = json.dumps({KEY_ID: str(public_key_path)})
-    return TestClient(create_app(_settings(ring))), private_key
+    return TestClient(
+        create_app(
+            _settings(
+                ring,
+                permit_authorizer_enabled=permit_authorizer_enabled,
+            )
+        )
+    ), private_key
+
+
+def _permit_authorization_body() -> dict[str, object]:
+    return {
+        "tenantId": str(uuid4()),
+        "runtimeExternalPermitId": str(uuid4()),
+        "runtimeRunId": str(uuid4()),
+        "taskExecutionGeneration": 1,
+        "leaseOwner": "worker-auth-test",
+        "leaseEpoch": 1,
+        "admissionSnapshotId": str(uuid4()),
+        "admissionSnapshotHash": "a" * 64,
+        "operationKind": "ADMISSION_RESOLVE",
+        "intentId": str(uuid4()),
+        "requestHash": "b" * 64,
+        "consumeEventId": str(uuid4()),
+    }
 
 
 def test_context_endpoints_require_their_exact_service_scopes(tmp_path: Path) -> None:
@@ -97,6 +126,28 @@ def test_context_endpoints_require_their_exact_service_scopes(tmp_path: Path) ->
         headers={"Authorization": f"Bearer {indexing_token}"},
         json={},
     ).status_code == 403
+
+
+def test_permit_authorizer_requires_its_exact_service_scope(tmp_path: Path) -> None:
+    client, private_key = _client(tmp_path, permit_authorizer_enabled=True)
+    correct_token = _token(
+        private_key,
+        _claims(scope="runtime.external-permit.authorize"),
+    )
+    wrong_token = _token(private_key, _claims(scope="agent.runtime.execute"))
+
+    assert client.post(
+        "/internal/v1/runtime-supervisor/external-permits/consume-and-authorize",
+        headers={"Authorization": f"Bearer {wrong_token}"},
+        json=_permit_authorization_body(),
+    ).status_code == 403
+    response = client.post(
+        "/internal/v1/runtime-supervisor/external-permits/consume-and-authorize",
+        headers={"Authorization": f"Bearer {correct_token}"},
+        json=_permit_authorization_body(),
+    )
+    assert response.status_code == 503
+    assert response.json()["code"] == "PERMIT_AUTHORIZATION_UNAVAILABLE"
 
 
 def test_missing_token_is_unauthorized_without_leaking_validation_details(tmp_path: Path) -> None:

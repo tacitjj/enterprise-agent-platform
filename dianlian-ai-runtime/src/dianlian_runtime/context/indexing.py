@@ -30,6 +30,7 @@ LEXICAL_V1_PROFILE = LexicalIndexProfile(
 @dataclass(frozen=True, slots=True)
 class LexicalChunk:
     chunk_id: str
+    content_hash: str
     ordinal: int
     content: str
 
@@ -113,10 +114,16 @@ def split_lexical_chunks(
         chunk_overlap=profile.chunk_overlap,
     )
     chunks = []
-    for ordinal, content in enumerate(splitter.split_text(request.normalized_text)):
+    normalized_parts: list[str] = []
+    for content in splitter.split_text(request.normalized_text):
         normalized = content.strip()
-        if not normalized:
-            continue
+        if normalized:
+            normalized_parts.extend(
+                normalized[offset : offset + 2_000]
+                for offset in range(0, len(normalized), 2_000)
+            )
+    for ordinal, normalized in enumerate(normalized_parts):
+        content_hash = sha256(normalized.encode("utf-8")).hexdigest()
         identity = "\0".join(
             (
                 profile.name,
@@ -128,14 +135,23 @@ def split_lexical_chunks(
                 request.source_version or "",
                 request.normalized_text_hash or "",
                 str(ordinal),
-                sha256(normalized.encode("utf-8")).hexdigest(),
+                content_hash,
             )
         )
         chunks.append(
             LexicalChunk(
                 chunk_id=sha256(identity.encode("utf-8")).hexdigest(),
+                content_hash=content_hash,
                 ordinal=ordinal,
                 content=normalized,
             )
         )
     return chunks
+
+
+def projection_manifest_hash(chunks: list[LexicalChunk]) -> str:
+    canonical = "".join(
+        f"{chunk.ordinal}\0{chunk.chunk_id}\0{chunk.content_hash}\n"
+        for chunk in sorted(chunks, key=lambda item: item.ordinal)
+    )
+    return sha256(canonical.encode("utf-8")).hexdigest()

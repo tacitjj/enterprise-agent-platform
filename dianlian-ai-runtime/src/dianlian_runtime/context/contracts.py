@@ -180,6 +180,14 @@ class ContextEvidence(StrictInternalModel):
     score: float = Field(strict=True, ge=0, le=1)
     citation: NonBlankText = Field(max_length=1_000)
 
+    @model_validator(mode="after")
+    def require_exact_chunk_content_hash(self) -> "ContextEvidence":
+        from hashlib import sha256
+
+        if sha256(self.excerpt.encode("utf-8")).hexdigest() != self.content_hash:
+            raise ValueError("contentHash must identify the exact excerpt bytes")
+        return self
+
 
 class ContextSourceBundle(StrictInternalModel):
     state: ContextSourceState
@@ -226,6 +234,19 @@ class ContextBundle(StrictInternalModel):
     knowledge: ContextSourceBundle
     memory: ContextSourceBundle
     retrieval_trace: RetrievalTrace = Field(alias="retrievalTrace")
+
+    @model_validator(mode="after")
+    def validate_evidence_layout(self) -> "ContextBundle":
+        knowledge = self.knowledge.evidence
+        memory = self.memory.evidence
+        if any(item.source_type != RequestedSource.KNOWLEDGE for item in knowledge):
+            raise ValueError("knowledge bundle contains a non-knowledge evidence source")
+        if any(item.source_type != RequestedSource.MEMORY for item in memory):
+            raise ValueError("memory bundle contains a non-memory evidence source")
+        evidence_ids = [item.evidence_id for item in knowledge + memory]
+        if len(evidence_ids) != len(set(evidence_ids)):
+            raise ValueError("evidenceId must be globally unique within ContextBundle")
+        return self
 
 
 class ServiceUnavailableResponse(StrictInternalModel):

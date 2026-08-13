@@ -27,9 +27,11 @@ from dianlian_runtime.context.indexing import (
     LexicalIndexProfile,
     decide_fence_write,
     projection_payload_hash,
+    projection_manifest_hash,
     split_lexical_chunks,
 )
 from dianlian_runtime.context.indexing_contracts import (
+    ChunkManifestEntry,
     ContextIndexingReceipt,
     ContextIndexingRequest,
     IndexApplyResult,
@@ -164,8 +166,21 @@ class PostgresContextService:
             operation=request.operation,
             result=result,
             eventSequence=request.event_sequence,
-            indexedChunkCount=len(chunks) if result == IndexApplyResult.APPLIED else 0,
+            indexedChunkCount=len(chunks),
             indexProfile=request.index_profile,
+            resourceType=request.resource_type,
+            resourceId=request.resource_id,
+            sourceId=request.source_id,
+            sourceVersion=request.source_version,
+            projectionManifestHash=projection_manifest_hash(chunks),
+            chunkManifest=[
+                ChunkManifestEntry(
+                    chunkId=chunk.chunk_id,
+                    chunkContentHash=chunk.content_hash,
+                    ordinal=chunk.ordinal,
+                )
+                for chunk in chunks
+            ],
         )
 
     def retrieve(self, request: ContextRetrievalRequest) -> ContextBundle:
@@ -383,7 +398,6 @@ class PostgresContextService:
                    chunk.source_version,
                    chunk.title,
                    chunk.content,
-                   chunk.normalized_text_hash AS evidence_content_hash,
                    chunk.citation,
                    LEAST(
                        1.0,
@@ -456,7 +470,6 @@ class PostgresContextService:
                    chunk.source_version,
                    chunk.title,
                    chunk.content,
-                   chunk.normalized_text_hash AS evidence_content_hash,
                    chunk.citation,
                    LEAST(
                        1.0,
@@ -512,7 +525,7 @@ class PostgresContextService:
 
     @staticmethod
     def _to_evidence(source: RequestedSource, row: dict) -> ContextEvidence:
-        excerpt = row["content"][:2_000]
+        excerpt = row["content"]
         return ContextEvidence(
             evidenceId=f"lexical:{row['chunk_id']}",
             sourceType=source,
@@ -521,7 +534,7 @@ class PostgresContextService:
             chunkId=row["chunk_id"],
             title=row["title"],
             excerpt=excerpt,
-            contentHash=row["evidence_content_hash"],
+            contentHash=sha256(excerpt.encode("utf-8")).hexdigest(),
             score=float(row["score"]),
             citation=row["citation"],
         )
@@ -550,13 +563,11 @@ class PostgresContextService:
             fixed_bytes = len((evidence.title + evidence.citation).encode("utf-8"))
             if fixed_bytes >= remaining_bytes:
                 continue
-            excerpt = _truncate_utf8(evidence.excerpt, remaining_bytes - fixed_bytes)
-            if not excerpt:
+            excerpt_bytes = len(evidence.excerpt.encode("utf-8"))
+            if fixed_bytes + excerpt_bytes > remaining_bytes:
                 continue
-            if excerpt != evidence.excerpt:
-                evidence = evidence.model_copy(update={"excerpt": excerpt})
             selected.append((source, evidence))
-            remaining_bytes -= fixed_bytes + len(excerpt.encode("utf-8"))
+            remaining_bytes -= fixed_bytes + excerpt_bytes
         return selected
 
     @staticmethod

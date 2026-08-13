@@ -34,8 +34,8 @@ env JAVA_HOME=/path/to/java-21 mvn -f dianlian-platform/pom.xml test
 
 ```bash
 cd dianlian-ai-runtime
-uv sync --frozen
-uv run pytest
+uv sync --frozen --group deerflow-h0
+uv run python -m pytest
 ```
 
 ### Web

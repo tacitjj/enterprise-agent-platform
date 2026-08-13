@@ -186,6 +186,12 @@ class ContextIndexingRequest(StrictInternalModel):
         return self
 
 
+class ChunkManifestEntry(StrictInternalModel):
+    chunk_id: Sha256Hex = Field(alias="chunkId")
+    chunk_content_hash: Sha256Hex = Field(alias="chunkContentHash")
+    ordinal: int = Field(strict=True, ge=0)
+
+
 class ContextIndexingReceipt(StrictInternalModel):
     contract_version: Literal["1.0"] = Field(alias="contractVersion")
     request_id: UUID = Field(alias="requestId")
@@ -197,3 +203,30 @@ class ContextIndexingReceipt(StrictInternalModel):
     event_sequence: int = Field(alias="eventSequence", strict=True, ge=1)
     indexed_chunk_count: int = Field(alias="indexedChunkCount", strict=True, ge=0)
     index_profile: IndexProfileName = Field(alias="indexProfile")
+    resource_type: IndexResourceType = Field(alias="resourceType")
+    resource_id: UUID = Field(alias="resourceId")
+    source_id: UUID | None = Field(alias="sourceId")
+    source_version: NonBlankText | None = Field(alias="sourceVersion", max_length=200)
+    projection_manifest_hash: Sha256Hex = Field(alias="projectionManifestHash")
+    chunk_manifest: list[ChunkManifestEntry] = Field(alias="chunkManifest", max_length=8_192)
+
+    @model_validator(mode="after")
+    def validate_manifest_shape(self) -> "ContextIndexingReceipt":
+        if self.indexed_chunk_count != len(self.chunk_manifest):
+            raise ValueError("indexedChunkCount must equal chunkManifest size")
+        if [item.ordinal for item in self.chunk_manifest] != list(range(len(self.chunk_manifest))):
+            raise ValueError("chunkManifest ordinals must be contiguous and canonical")
+        if len({item.chunk_id for item in self.chunk_manifest}) != len(self.chunk_manifest):
+            raise ValueError("chunkManifest chunkId values must be unique")
+        canonical = "".join(
+            f"{item.ordinal}\0{item.chunk_id}\0{item.chunk_content_hash}\n"
+            for item in self.chunk_manifest
+        )
+        if sha256(canonical.encode("utf-8")).hexdigest() != self.projection_manifest_hash:
+            raise ValueError("projectionManifestHash must identify chunkManifest")
+        if self.operation == IndexOperation.UPSERT:
+            if self.source_id is None or self.source_version is None or not self.chunk_manifest:
+                raise ValueError("UPSERT receipt requires source identity and chunk manifest")
+        elif self.source_id is not None or self.source_version is not None or self.chunk_manifest:
+            raise ValueError("DELETE receipt cannot contain source identity or chunks")
+        return self

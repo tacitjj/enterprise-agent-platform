@@ -14,7 +14,7 @@
 ## 本地验证
 
 - Java：运行受影响 Maven 模块的测试。
-- Python：在 `dianlian-ai-runtime` 中运行 `uv run pytest`。
+- Python：在 `dianlian-ai-runtime` 中先运行 `uv sync --frozen --group deerflow-h0`，再运行 `uv run python -m pytest`。
 - Web：在 `dianlian-web` 中依次运行 `npm test`、`npm run build` 和 `npm run test:sites`。
 
 请在 Pull Request 中写明实际执行的检查和仍未覆盖的风险。

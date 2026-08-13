@@ -10,6 +10,13 @@ All notable public changes are documented here. The format follows [Keep a Chang
 - Concise architecture overview and public roadmap.
 - Cross-stack GitHub Actions validation.
 - Issue, pull request, support, and community governance templates.
+- Gated DeerFlow H0/H1 harnesses with authenticated execution APIs and pinned upstream boundaries.
+- Durable Runtime Supervisor migrations and tested lease, fencing, terminal-event, admission, and external-permit primitives.
+- A fail-closed permit-authorizer endpoint backed by a separately privileged PostgreSQL role.
+
+### Changed
+
+- Python CI now installs the locked Harness dependency group and runs pytest as a module for reproducible nested-test imports.
 
 ## [0.1.0] - 2026-08-12
 

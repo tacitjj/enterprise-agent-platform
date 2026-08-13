@@ -7,6 +7,7 @@ This roadmap separates implemented foundations from planned work. It is directio
 - Java 21 modular control plane for identity, enterprise agents, tasks, billing, knowledge, memory, context, model routing, interaction, and integrations.
 - Versioned public/internal OpenAPI contracts, AsyncAPI events, and fixtures.
 - FastAPI context indexing and retrieval boundary with internal authentication and PostgreSQL migrations.
+- Gated DeerFlow H0/H1 harnesses and durable Supervisor foundations with explicit migrations, lease fencing, terminal-event invariants, and external-permit authorization.
 - React user, enterprise administration, and platform operation surfaces with explicit API adapters.
 - Local PostgreSQL/pgvector and Redis orchestration.
 - Automated Java, Python, and Web validation.
@@ -21,7 +22,7 @@ This roadmap separates implemented foundations from planned work. It is directio
 
 ## Gated research
 
-- Long-running agent execution with durable checkpoints, lease recovery, and fencing.
+- Production composition and cross-process takeover for the durable runtime foundations.
 - Controlled tool execution and remote side-effect reconciliation.
 - Retrieval quality evaluation and optional GraphRAG based on measured need.
 - Production deployment guidance after threat modeling and security review.
