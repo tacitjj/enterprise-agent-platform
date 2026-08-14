@@ -65,6 +65,7 @@ from dianlian_runtime.harness.api_contracts import (
 from dianlian_runtime.harness.h0_runtime import (
     GuidanceOutcomeUnknown,
     GuidancePreconditionRejected,
+    H0IdempotencyConflict,
 )
 from dianlian_runtime.harness.h1_contracts import (
     CreateH1ExecutionRequest,
@@ -670,8 +671,18 @@ def create_app(
                 )
             except ValueError as exception:
                 return _runtime_problem(422, "RUNTIME_REQUEST_INVALID", str(exception))
-            except RuntimeError as exception:
-                return _runtime_problem(409, "RUNTIME_IDEMPOTENCY_CONFLICT", str(exception))
+            except H0IdempotencyConflict:
+                return _runtime_problem(
+                    409,
+                    "RUNTIME_IDEMPOTENCY_CONFLICT",
+                    "The execution identity is already bound to another request.",
+                )
+            except RuntimeError:
+                return _runtime_problem(
+                    503,
+                    "RUNTIME_UNAVAILABLE",
+                    "The H0 runtime is temporarily unavailable.",
+                )
             return ExecutionSnapshotResponse.from_snapshot(snapshot)
 
         @app.get(

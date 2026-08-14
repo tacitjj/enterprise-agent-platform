@@ -38,6 +38,10 @@ class GuidanceOutcomeUnknown(RuntimeError):
     """DeerFlow invocation started, so applying the guidance is uncertain."""
 
 
+class H0IdempotencyConflict(RuntimeError):
+    """An H0 identity is already bound to a different request."""
+
+
 class _DummyState(TypedDict, total=False):
     prompt: str
     guidance: str
@@ -185,29 +189,33 @@ class DeerFlowH0Runtime:
             existing = await self._find_by_idempotency_key(request.idempotency_key)
             if existing is not None:
                 _validate_replay(existing, request)
-                return _snapshot(existing)
-            existing = await self._find_by_execution_id(request.execution_id)
-            if existing is not None:
-                raise RuntimeError("execution_id is already mapped to another request")
+                if existing["status"] != "CREATING" or existing["deerflow_run_id"]:
+                    return _snapshot(existing)
+            else:
+                existing = await self._find_by_execution_id(request.execution_id)
+                if existing is not None:
+                    raise H0IdempotencyConflict(
+                        "execution_id is already mapped to another request"
+                    )
 
-            now = _now_iso()
-            await self._mapping_db.execute(
-                """
-                INSERT INTO execution_mapping (
-                    execution_id, idempotency_key, thread_id, request_hash, status,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, 'CREATING', ?, ?)
-                """,
-                (
-                    request.execution_id,
-                    request.idempotency_key,
-                    request.thread_id,
-                    request.request_hash,
-                    now,
-                    now,
-                ),
-            )
-            await self._mapping_db.commit()
+                now = _now_iso()
+                await self._mapping_db.execute(
+                    """
+                    INSERT INTO execution_mapping (
+                        execution_id, idempotency_key, thread_id, request_hash, status,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, 'CREATING', ?, ?)
+                    """,
+                    (
+                        request.execution_id,
+                        request.idempotency_key,
+                        request.thread_id,
+                        request.request_hash,
+                        now,
+                        now,
+                    ),
+                )
+                await self._mapping_db.commit()
 
             run = await self._run_manager.create(
                 request.thread_id,
@@ -483,7 +491,9 @@ def _validate_replay(row: aiosqlite.Row, request: StartExecutionRequest) -> None
         or row["thread_id"] != request.thread_id
         or row["request_hash"] != request.request_hash
     ):
-        raise RuntimeError("idempotency_key is already mapped to another request")
+        raise H0IdempotencyConflict(
+            "idempotency_key is already mapped to another request"
+        )
 
 
 def _validate_id(value: str, label: str) -> None:

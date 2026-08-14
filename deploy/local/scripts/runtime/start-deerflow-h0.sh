@@ -124,21 +124,19 @@ public_key_ring_json="$(
         'import json, os; print(json.dumps({os.environ["DIANLIAN_LOCAL_KEY_ID"]: os.environ["DIANLIAN_LOCAL_PUBLIC_KEY_PATH"]}, separators=(",", ":")))'
 )"
 
-# A shared local .env may also contain database, user-session, model or Java-only
-# credentials. H0 does not need them, so do not pass those values to Python.
-unset DIANLIAN_DATABASE_URL
-unset DIANLIAN_POSTGRES_PASSWORD
-unset DIANLIAN_REDIS_PASSWORD
-unset DIANLIAN_JWT_SECRET
-unset DIANLIAN_MODEL_PROVIDER_KEY
-unset DIANLIAN_LOCAL_PASSWORD_HASH
-unset DIANLIAN_LOCAL_PLATFORM_PASSWORD_HASH
-unset DIANLIAN_SERVICE_JWT_PRIVATE_KEY_PATH
+# A shared local .env may gain new database, user-session, model or Java-only
+# credentials over time. H0 uses an allowlist, so no inherited DIANLIAN_* value
+# can silently cross this process boundary.
+while IFS= read -r variable_name; do
+    unset "${variable_name}"
+done < <(compgen -A variable DIANLIAN_)
 
 export DIANLIAN_RUNTIME_ROLE=runtime-api
 export DIANLIAN_CONTEXT_ENABLED=false
 export DIANLIAN_AGENT_ENABLED=false
 export DIANLIAN_RUN_SUPERVISOR_ENABLED=false
+export DIANLIAN_DEERFLOW_H1_ENABLED=false
+export DIANLIAN_PERMIT_AUTHORIZER_ENABLED=false
 export DIANLIAN_DEERFLOW_H0_ENABLED=true
 export DIANLIAN_DEERFLOW_SOURCE_ROOT="${deerflow_source_root}"
 export DIANLIAN_DEERFLOW_DATA_DIR="${deerflow_data_dir}"
