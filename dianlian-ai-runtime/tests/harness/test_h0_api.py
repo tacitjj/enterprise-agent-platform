@@ -402,6 +402,7 @@ def test_h0_exact_retry_recovers_a_creating_mapping() -> None:
         assert replayed == recovered
         assert runtime._run_manager.create_count == 1
         assert runtime.events == [
+            "dianlian.h0.creation.recovered",
             "dianlian.h0.started",
             "dianlian.h0.checkpoint",
         ]

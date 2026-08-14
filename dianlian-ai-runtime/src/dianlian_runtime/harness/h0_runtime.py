@@ -186,11 +186,13 @@ class DeerFlowH0Runtime:
             raise ValueError("prompt must not be blank")
 
         async with self._lock:
+            recovering_creation = False
             existing = await self._find_by_idempotency_key(request.idempotency_key)
             if existing is not None:
                 _validate_replay(existing, request)
                 if existing["status"] != "CREATING" or existing["deerflow_run_id"]:
                     return _snapshot(existing)
+                recovering_creation = True
             else:
                 existing = await self._find_by_execution_id(request.execution_id)
                 if existing is not None:
@@ -228,6 +230,14 @@ class DeerFlowH0Runtime:
                 deerflow_run_id=run.run_id,
                 status="RUNNING",
             )
+            if recovering_creation:
+                await self._put_event(
+                    request.thread_id,
+                    run.run_id,
+                    "dianlian.h0.creation.recovered",
+                    "recovery",
+                    {"executionId": request.execution_id},
+                )
             await self._put_event(
                 request.thread_id,
                 run.run_id,
