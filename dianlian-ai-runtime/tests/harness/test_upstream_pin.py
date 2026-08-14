@@ -21,3 +21,6 @@ def test_deerflow_poc_candidate_is_an_immutable_non_production_pin() -> None:
     }
     assert "upstream-compatibility" in lock["requiredGates"]
     assert "scope-isolation" in lock["requiredGates"]
+    assert lock["h0"]["productionTakeoverEnabled"] is False
+    assert lock["h0"]["modelCallsEnabled"] is False
+    assert lock["h0"]["toolCallsEnabled"] is False

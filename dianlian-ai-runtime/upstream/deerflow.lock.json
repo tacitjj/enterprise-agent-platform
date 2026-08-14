@@ -23,6 +23,12 @@
     "managerClass": "noop"
   },
   "productionApproved": false,
+  "h0": {
+    "adapterVersion": "h0",
+    "productionTakeoverEnabled": false,
+    "modelCallsEnabled": false,
+    "toolCallsEnabled": false
+  },
   "requiredGates": [
     "upstream-compatibility",
     "run-ownership-and-takeover",

@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.12,<3.15"
 dependencies = [
   "fastapi==0.139.2",
+  "httpx==0.28.1",
   "llama-index-core==0.14.22",
   "psycopg[binary,pool]>=3.2,<4",
   "PyJWT[crypto]==2.13.0",
@@ -18,8 +19,17 @@ dependencies = [
 
 [project.scripts]
 dianlian-context-migrate = "dianlian_runtime.migrations:main"
+dianlian-supervisor-migrate = "dianlian_runtime.supervisor.migrations:main"
 
 [dependency-groups]
+deerflow-h0 = [
+    "aiosqlite>=0.19",
+    "alembic>=1.13",
+    "langchain>=1.3",
+    "langgraph>=1.2.9,<1.3",
+    "langgraph-checkpoint-sqlite>=3.1.1,<3.2",
+    "sqlalchemy[asyncio]>=2.0,<3.0",
+]
 dev = [
   "httpx2>=2.10,<3",
   "pytest>=8.4,<10",

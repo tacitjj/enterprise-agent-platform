@@ -58,7 +58,7 @@ Read the concise [architecture overview](docs/architecture/overview.md) or the d
 | Versioned API and event contracts | Implemented | Public and internal OpenAPI plus AsyncAPI contracts and fixtures |
 | React application surfaces | Working prototype, API migration in progress | API mode fails visibly and does not fall back to demo facts |
 | FastAPI context boundary | Implemented and tested | Health, internal authentication, indexing, retrieval, migrations, and PostgreSQL integration |
-| Long-running agent runtime | Conditional / planned | Enabled only after recovery, fencing, security, and quality gates pass |
+| Durable runtime foundations | Experimental and tested | Gated DeerFlow H0/H1 harnesses, explicit Supervisor migrations, lease/fencing primitives, and fail-closed external-permit authorization; production composition and cross-process takeover remain disabled |
 | Production deployment | Not supported | Independent hardening, threat modeling, observability, and operational review are still required |
 
 See [ROADMAP.md](ROADMAP.md) for the planned sequence and [CHANGELOG.md](CHANGELOG.md) for released changes.
@@ -114,7 +114,7 @@ Run the Python boundary:
 
 ```bash
 cd dianlian-ai-runtime
-uv sync --frozen
+uv sync --frozen --group deerflow-h0
 uv run uvicorn dianlian_runtime.app:create_app --factory --host 127.0.0.1 --port 8091
 ```
 
@@ -134,8 +134,8 @@ npm run build
 npm run test:sites
 
 cd ../dianlian-ai-runtime
-uv sync --frozen
-uv run pytest
+uv sync --frozen --group deerflow-h0
+uv run python -m pytest
 ```
 
 ## Security model

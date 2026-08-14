@@ -11,11 +11,13 @@ from dianlian_runtime.context.indexing import (
     FenceDecision,
     LEXICAL_V1_PROFILE,
     decide_fence_write,
+    projection_manifest_hash,
     split_lexical_chunks,
 )
 from dianlian_runtime.context.indexing_contracts import (
     ContextIndexingReceipt,
     ContextIndexingRequest,
+    ChunkManifestEntry,
     IndexApplyResult,
     IndexOperation,
 )
@@ -83,6 +85,7 @@ class ReadyIndexingService:
         return True
 
     def apply(self, request: ContextIndexingRequest) -> ContextIndexingReceipt:
+        chunks = split_lexical_chunks(request, LEXICAL_V1_PROFILE)
         return ContextIndexingReceipt(
             contractVersion="1.0",
             requestId=request.request_id,
@@ -92,8 +95,21 @@ class ReadyIndexingService:
             operation=request.operation,
             result=IndexApplyResult.APPLIED,
             eventSequence=request.event_sequence,
-            indexedChunkCount=1,
+            indexedChunkCount=len(chunks),
             indexProfile=request.index_profile,
+            resourceType=request.resource_type,
+            resourceId=request.resource_id,
+            sourceId=request.source_id,
+            sourceVersion=request.source_version,
+            projectionManifestHash=projection_manifest_hash(chunks),
+            chunkManifest=[
+                ChunkManifestEntry(
+                    chunkId=chunk.chunk_id,
+                    chunkContentHash=chunk.content_hash,
+                    ordinal=chunk.ordinal,
+                )
+                for chunk in chunks
+            ],
         )
 
 
@@ -162,6 +178,7 @@ def test_indexing_title_accepts_500_characters_and_rejects_501() -> None:
 
 
 def test_context_evidence_accepts_500_character_title() -> None:
+    excerpt = "证据正文"
     evidence = ContextEvidence(
         evidenceId="lexical:test",
         sourceType="KNOWLEDGE",
@@ -169,8 +186,8 @@ def test_context_evidence_accepts_500_character_title() -> None:
         sourceVersion="60000000-0000-0000-0000-000000000101",
         chunkId="a" * 64,
         title="题" * 500,
-        excerpt="证据正文",
-        contentHash="b" * 64,
+        excerpt=excerpt,
+        contentHash=sha256(excerpt.encode("utf-8")).hexdigest(),
         score=1.0,
         citation="测试知识 / 版本 1",
     )
