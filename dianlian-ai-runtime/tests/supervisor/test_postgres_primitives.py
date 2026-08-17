@@ -25,7 +25,7 @@ ADMIT_RUNTIME_RUN_SQL = """
            next_event_sequence_no, lease_epoch, attempt
       FROM deer_runtime.admit_runtime_run(
           %s::UUID, %s::UUID, %s::UUID, %s::UUID,
-          %s::UUID, %s::UUID, %s::UUID, %s::UUID,
+          %s::UUID, %s::UUID, %s::VARCHAR, %s::UUID, %s::UUID,
           %s::BIGINT, %s::VARCHAR, %s::VARCHAR,
           %s::UUID, %s::UUID, %s::UUID, %s::UUID, %s::JSONB,
           %s::UUID, %s::BIGINT, %s::VARCHAR, %s::VARCHAR,
@@ -149,6 +149,7 @@ def _admission_parameters(
         task_step_id or uuid4(),
         uuid4(),
         uuid4(),
+        "CONVERSATION",
         uuid4(),
         None,
         runtime_thread_revision,
@@ -173,7 +174,7 @@ def _admission_parameters(
         admission_snapshot_id or uuid4(),
         admission_snapshot_hash,
         accepted_event_id or uuid4(),
-        '{"source":"postgres-test"}',
+        '{"schemaVersion":"runtime-run-accepted-v2","source":"postgres-test"}',
     )
 
 
@@ -300,6 +301,14 @@ def test_external_operation_arm_is_one_shot_and_unknown_reconciles_monotonically
         assert connection.execute(
             RECORD_RUNTIME_EXTERNAL_OPERATION_OUTCOME_SQL, record_parameters
         ).fetchone() == unknown
+        wrong_record_hash = list(record_parameters)
+        wrong_record_hash[15] = "d" * 64
+        with pytest.raises(psycopg.errors.UniqueViolation):
+            with connection.transaction():
+                connection.execute(
+                    RECORD_RUNTIME_EXTERNAL_OPERATION_OUTCOME_SQL,
+                    tuple(wrong_record_hash),
+                ).fetchone()
 
         reconcile_parameters = (
             *arm_parameters[:11], unknown_event_id, reconcile_event_id,
@@ -314,9 +323,98 @@ def test_external_operation_arm_is_one_shot_and_unknown_reconciles_monotonically
         assert connection.execute(
             RECONCILE_RUNTIME_EXTERNAL_OPERATION_OUTCOME_SQL, reconcile_parameters
         ).fetchone() == reconciled
+        wrong_reconcile_version = list(reconcile_parameters)
+        wrong_reconcile_version[15] = 3
+        with pytest.raises(psycopg.errors.UniqueViolation):
+            with connection.transaction():
+                connection.execute(
+                    RECONCILE_RUNTIME_EXTERNAL_OPERATION_OUTCOME_SQL,
+                    tuple(wrong_reconcile_version),
+                ).fetchone()
+        wrong_reconcile_hash = list(reconcile_parameters)
+        wrong_reconcile_hash[16] = "c" * 64
+        with pytest.raises(psycopg.errors.UniqueViolation):
+            with connection.transaction():
+                connection.execute(
+                    RECONCILE_RUNTIME_EXTERNAL_OPERATION_OUTCOME_SQL,
+                    tuple(wrong_reconcile_hash),
+                ).fetchone()
 
-        with connection.transaction():
-            with pytest.raises(psycopg.errors.UniqueViolation):
+        events = connection.execute(
+            """
+            SELECT event_id, event_sequence, event_type, from_status, to_status,
+                   source_fact_id, source_fact_version, source_fact_hash,
+                   outcome_code, evidence_kind, result_hash
+              FROM deer_runtime.runtime_external_operation_event
+             WHERE tenant_id = %s AND runtime_external_permit_id = %s
+             ORDER BY event_sequence
+            """,
+            (tenant_id, permit_id),
+        ).fetchall()
+        assert events == [
+            {
+                "event_id": arm_event_id,
+                "event_sequence": 1,
+                "event_type": "DISPATCH_ARMED",
+                "from_status": None,
+                "to_status": "DISPATCH_ARMED",
+                "source_fact_id": None,
+                "source_fact_version": None,
+                "source_fact_hash": None,
+                "outcome_code": None,
+                "evidence_kind": None,
+                "result_hash": None,
+            },
+            {
+                "event_id": unknown_event_id,
+                "event_sequence": 2,
+                "event_type": "OUTCOME_RECORDED",
+                "from_status": "DISPATCH_ARMED",
+                "to_status": "OUTCOME_UNKNOWN",
+                "source_fact_id": source_fact_id,
+                "source_fact_version": 1,
+                "source_fact_hash": "8" * 64,
+                "outcome_code": "PROVIDER_RESPONSE_UNCERTAIN",
+                "evidence_kind": "JAVA_CANONICAL_FACT",
+                "result_hash": None,
+            },
+            {
+                "event_id": reconcile_event_id,
+                "event_sequence": 3,
+                "event_type": "OUTCOME_RECONCILED",
+                "from_status": "OUTCOME_UNKNOWN",
+                "to_status": "SUCCEEDED",
+                "source_fact_id": source_fact_id,
+                "source_fact_version": 2,
+                "source_fact_hash": "9" * 64,
+                "outcome_code": "PROVIDER_SUCCEEDED",
+                "evidence_kind": "JAVA_CANONICAL_FACT",
+                "result_hash": "a" * 64,
+            },
+        ]
+
+        with pytest.raises(psycopg.errors.ObjectNotInPrerequisiteState):
+            with connection.transaction():
+                connection.execute(
+                    """
+                    UPDATE deer_runtime.runtime_external_operation_event
+                       SET actor = actor
+                     WHERE tenant_id = %s AND runtime_external_permit_id = %s
+                    """,
+                    (tenant_id, permit_id),
+                )
+        with pytest.raises(psycopg.errors.ObjectNotInPrerequisiteState):
+            with connection.transaction():
+                connection.execute(
+                    """
+                    DELETE FROM deer_runtime.runtime_external_operation_event
+                     WHERE tenant_id = %s AND runtime_external_permit_id = %s
+                    """,
+                    (tenant_id, permit_id),
+                )
+
+        with pytest.raises(psycopg.errors.UniqueViolation):
+            with connection.transaction():
                 connection.execute(
                     RECONCILE_RUNTIME_EXTERNAL_OPERATION_OUTCOME_SQL,
                     (*reconcile_parameters[:11], uuid4(), *reconcile_parameters[12:]),
@@ -463,6 +561,51 @@ def test_external_operation_barrier_blocks_normal_terminal_but_allows_unknown_fa
             (tenant_id, runtime_run_id, uuid4()),
         ).fetchone() is None
 
+        unknown_event_id = uuid4()
+        source_fact_id = uuid4()
+        unknown = connection.execute(
+            RECORD_RUNTIME_EXTERNAL_OPERATION_OUTCOME_SQL,
+            (
+                *_arm_parameters(
+                    tenant_id, runtime_run_id, binding, permit_id, intent_id,
+                    request_hash, arm_event_id,
+                )[:11],
+                unknown_event_id, "OUTCOME_UNKNOWN", source_fact_id, 1,
+                "0" * 64, "PROVIDER_RESPONSE_UNCERTAIN",
+                "JAVA_CANONICAL_FACT", None, "java-reconciler",
+            ),
+        ).fetchone()
+        assert unknown is not None and unknown["status"] == "OUTCOME_UNKNOWN"
+        barrier = connection.execute(
+            """
+            SELECT * FROM deer_runtime.load_runtime_external_operation_barrier(
+                %s::UUID, %s::UUID, 1::BIGINT, 'worker-a'::VARCHAR, 1::BIGINT
+            )
+            """,
+            (tenant_id, runtime_run_id),
+        ).fetchone()
+        assert barrier is not None
+        assert barrier["dispatch_armed_count"] == 0
+        assert barrier["outcome_unknown_count"] == 1
+        assert barrier["blocking"] is True
+        assert connection.execute(
+            """
+            SELECT status FROM deer_runtime.complete_runtime_run(
+                %s, %s, 'worker-a', 1, %s, 'NORMAL_COMPLETION', '{}'::JSONB
+            )
+            """,
+            (tenant_id, runtime_run_id, uuid4()),
+        ).fetchone() is None
+        assert connection.execute(
+            """
+            SELECT status FROM deer_runtime.fail_runtime_run(
+                %s, %s, 'worker-a', 1, %s,
+                'MODEL_FAILED', 'PROVIDER_FAILED', '{}'::JSONB
+            )
+            """,
+            (tenant_id, runtime_run_id, uuid4()),
+        ).fetchone() is None
+
         failed = connection.execute(
             """
             SELECT status, failure_code FROM deer_runtime.fail_runtime_run(
@@ -483,7 +626,7 @@ def test_external_operation_barrier_blocks_normal_terminal_but_allows_unknown_fa
             """,
             (tenant_id, permit_id),
         ).fetchone()
-        assert projection == {"status": "DISPATCH_ARMED"}
+        assert projection == {"status": "OUTCOME_UNKNOWN"}
 
 
 def test_external_operation_late_outcome_after_takeover_uses_historical_binding() -> None:
@@ -554,17 +697,26 @@ def test_external_operation_barrier_blocks_cancelled_but_allows_unknown_cancel()
         assert connection.execute(
             CONSUME_AND_ARM_RUNTIME_EXTERNAL_DISPATCH_SQL,
             tuple(tool_arm_parameters),
-        ).fetchone()[0] == "GRANTED_NOW"
+        ).fetchone()["dispatch_decision"] == "GRANTED_NOW"
         control_id = uuid4()
+        cancel_actor_id = uuid4()
+        cancel_key = f"cancel-{control_id}"
         assert connection.execute(
             """
             SELECT COUNT(*) AS row_count
               FROM deer_runtime.request_runtime_run_cancel(
-                  %s, %s, %s, %s, 'worker-a', 1,
-                  'USER_REQUESTED', %s, '{}'::JSONB
+                  %s, %s, %s, %s, 'USER_REQUESTED', 2,
+                  %s, %s, '{}'::JSONB
               )
             """,
-            (tenant_id, runtime_run_id, control_id, uuid4(), f"cancel-{control_id}"),
+            (
+                tenant_id,
+                runtime_run_id,
+                control_id,
+                cancel_actor_id,
+                cancel_key,
+                "6" * 64,
+            ),
         ).fetchone()["row_count"] == 1
         assert connection.execute(
             """
@@ -574,6 +726,26 @@ def test_external_operation_barrier_blocks_cancelled_but_allows_unknown_cancel()
             """,
             (tenant_id, runtime_run_id, uuid4()),
         ).fetchone() == {"status": "CANCELLING"}
+        assert connection.execute(
+            """
+            SELECT status FROM deer_runtime.finish_runtime_run_cancellation(
+                %s, %s, 'worker-a', 1, 'CANCELLED', %s,
+                'USER_REQUESTED', '{}'::JSONB
+            )
+            """,
+            (tenant_id, runtime_run_id, uuid4()),
+        ).fetchone() is None
+        unknown_event_id = uuid4()
+        source_fact_id = uuid4()
+        unknown_parameters = (
+            *tuple(tool_arm_parameters)[:11], unknown_event_id, "OUTCOME_UNKNOWN",
+            source_fact_id, 1, "5" * 64, "PROVIDER_RESPONSE_UNCERTAIN",
+            "JAVA_CANONICAL_FACT", None, "java-reconciler",
+        )
+        unknown = connection.execute(
+            RECORD_RUNTIME_EXTERNAL_OPERATION_OUTCOME_SQL, unknown_parameters
+        ).fetchone()
+        assert unknown is not None and unknown["status"] == "OUTCOME_UNKNOWN"
         assert connection.execute(
             """
             SELECT status FROM deer_runtime.finish_runtime_run_cancellation(
@@ -599,7 +771,7 @@ def test_external_operation_barrier_blocks_cancelled_but_allows_unknown_cancel()
              WHERE tenant_id = %s AND runtime_external_permit_id = %s
             """,
             (tenant_id, permit_id),
-        ).fetchone() == {"status": "DISPATCH_ARMED"}
+        ).fetchone() == {"status": "OUTCOME_UNKNOWN"}
 
 
 def _invoke_twice_behind_run_lock(
@@ -1447,6 +1619,129 @@ def test_external_permit_takeover_before_consume_fences_old_attempt() -> None:
         ).fetchone() == {"consumed_count": 1, "attempt_count": 2}
 
 
+def test_admission_permit_takeover_reissues_one_read_attempt_per_epoch() -> None:
+    assert TEST_DSN is not None
+    tenant_id, runtime_run_id = _seed_claimed_run()
+    binding = _runtime_permit_binding(tenant_id, runtime_run_id)
+    intent_id = binding["admission_snapshot_id"]
+    request_hash = binding["admission_snapshot_hash"]
+    first_permit_id = uuid4()
+
+    with psycopg.connect(TEST_DSN, row_factory=dict_row) as connection:
+        first = connection.execute(
+            ISSUE_RUNTIME_EXTERNAL_PERMIT_SQL,
+            (
+                tenant_id,
+                runtime_run_id,
+                "worker-a",
+                1,
+                first_permit_id,
+                "ADMISSION_RESOLVE",
+                intent_id,
+                request_hash,
+                30,
+                uuid4(),
+            ),
+        ).fetchone()
+        assert first is not None and first["permit_attempt"] == 1
+        consumed = connection.execute(
+            CONSUME_AND_AUTHORIZE_RUNTIME_EXTERNAL_PERMIT_SQL,
+            (
+                tenant_id,
+                first_permit_id,
+                runtime_run_id,
+                binding["task_execution_generation"],
+                "worker-a",
+                1,
+                binding["admission_snapshot_id"],
+                binding["admission_snapshot_hash"],
+                "ADMISSION_RESOLVE",
+                intent_id,
+                request_hash,
+                uuid4(),
+                "java-admission-authorizer",
+            ),
+        ).fetchone()
+        assert consumed is not None and consumed["status"] == "CONSUMED"
+
+    takeover = _expire_and_take_over(
+        tenant_id,
+        runtime_run_id,
+        new_owner="worker-b",
+    )
+    assert takeover["lease_epoch"] == 2
+
+    second_permit_id = uuid4()
+    second_issue_event_id = uuid4()
+    second_issue_parameters = (
+        tenant_id,
+        runtime_run_id,
+        "worker-b",
+        2,
+        second_permit_id,
+        "ADMISSION_RESOLVE",
+        intent_id,
+        request_hash,
+        30,
+        second_issue_event_id,
+    )
+    with psycopg.connect(TEST_DSN, row_factory=dict_row) as connection:
+        second = connection.execute(
+            ISSUE_RUNTIME_EXTERNAL_PERMIT_SQL,
+            second_issue_parameters,
+        ).fetchone()
+        assert second is not None
+        assert second["runtime_external_permit_id"] == second_permit_id
+        assert second["permit_attempt"] == 2
+        assert second["status"] == "ISSUED"
+        assert second["lease_owner"] == "worker-b"
+        assert second["lease_epoch"] == 2
+
+        second_consumed = connection.execute(
+            CONSUME_AND_AUTHORIZE_RUNTIME_EXTERNAL_PERMIT_SQL,
+            (
+                tenant_id,
+                second_permit_id,
+                runtime_run_id,
+                binding["task_execution_generation"],
+                "worker-b",
+                2,
+                binding["admission_snapshot_id"],
+                binding["admission_snapshot_hash"],
+                "ADMISSION_RESOLVE",
+                intent_id,
+                request_hash,
+                uuid4(),
+                "java-admission-authorizer",
+            ),
+        ).fetchone()
+        assert second_consumed is not None
+        assert second_consumed["status"] == "CONSUMED"
+        assert second_consumed["permit_attempt"] == 2
+
+        # A different identity in the same epoch cannot create attempt 3.
+        same_epoch = list(second_issue_parameters)
+        same_epoch[4] = uuid4()
+        same_epoch[9] = uuid4()
+        replayed = connection.execute(
+            ISSUE_RUNTIME_EXTERNAL_PERMIT_SQL,
+            tuple(same_epoch),
+        ).fetchone()
+        assert replayed is not None
+        assert replayed["runtime_external_permit_id"] == second_permit_id
+        assert replayed["permit_attempt"] == 2
+        assert connection.execute(
+            """
+            SELECT COUNT(*) AS attempt_count,
+                   COUNT(*) FILTER (WHERE status = 'CONSUMED') AS consumed_count
+              FROM deer_runtime.runtime_external_permit_attempt
+             WHERE tenant_id = %s AND runtime_run_id = %s
+               AND operation_kind = 'ADMISSION_RESOLVE' AND intent_id = %s
+            """,
+            (tenant_id, runtime_run_id, intent_id),
+        ).fetchone() == {"attempt_count": 2, "consumed_count": 2}
+
+
 def test_external_permit_current_wrapper_concurrent_replay_is_single_fact() -> None:
     assert TEST_DSN is not None
     tenant_id, runtime_run_id = _seed_claimed_run()
@@ -1685,11 +1980,11 @@ def test_admission_exact_replay_rejects_distinct_active_intent() -> None:
         }
 
         distinct_active_parameters = list(parameters)
-        distinct_active_parameters[16] = uuid4()
-        distinct_active_parameters[17] = 2
-        distinct_active_parameters[21] = f"admit-{distinct_active_parameters[16]}"
-        distinct_active_parameters[27] = uuid4()
-        distinct_active_parameters[29] = uuid4()
+        distinct_active_parameters[17] = uuid4()
+        distinct_active_parameters[18] = 2
+        distinct_active_parameters[22] = f"admit-{distinct_active_parameters[17]}"
+        distinct_active_parameters[28] = uuid4()
+        distinct_active_parameters[30] = uuid4()
         assert connection.execute(
             ADMIT_RUNTIME_RUN_SQL,
             tuple(distinct_active_parameters),
@@ -1699,7 +1994,7 @@ def test_admission_exact_replay_rejects_distinct_active_intent() -> None:
 
     with psycopg.connect(TEST_DSN) as connection:
         conflicting_parameters = list(parameters)
-        conflicting_parameters[20] = "b" * 64
+        conflicting_parameters[21] = "b" * 64
         with pytest.raises(psycopg.errors.UniqueViolation):
             connection.execute(ADMIT_RUNTIME_RUN_SQL, tuple(conflicting_parameters)).fetchone()
         connection.rollback()
@@ -1727,9 +2022,9 @@ def test_admission_exact_replay_rejects_distinct_active_intent() -> None:
             "status": "QUEUED",
             "event_count": 1,
             "event_type": "RUN_ACCEPTED",
-            "admission_contract_version": parameters[26],
-            "admission_snapshot_id": parameters[27],
-            "admission_snapshot_hash": parameters[28],
+            "admission_contract_version": parameters[27],
+            "admission_snapshot_id": parameters[28],
+            "admission_snapshot_hash": parameters[29],
         }
 
 
@@ -1737,14 +2032,14 @@ def test_admission_receipt_conflicts_roll_back_atomically_and_is_append_only() -
     assert TEST_DSN is not None
     parameters = _admission_parameters()
     tenant_id = parameters[0]
-    runtime_run_id = parameters[16]
-    snapshot_id = parameters[27]
+    runtime_run_id = parameters[17]
+    snapshot_id = parameters[28]
     with psycopg.connect(TEST_DSN) as connection:
         assert connection.execute(ADMIT_RUNTIME_RUN_SQL, parameters).fetchone() is not None
 
     for index, conflicting_value in (
-        (27, uuid4()),
-        (28, "e" * 64),
+        (28, uuid4()),
+        (29, "e" * 64),
     ):
         conflicting_parameters = list(parameters)
         conflicting_parameters[index] = conflicting_value
@@ -1756,7 +2051,7 @@ def test_admission_receipt_conflicts_roll_back_atomically_and_is_append_only() -
                 ).fetchone()
 
     unsupported_parameters = list(parameters)
-    unsupported_parameters[26] = "2.1"
+    unsupported_parameters[27] = "2.1"
     with psycopg.connect(TEST_DSN) as connection:
         with pytest.raises(psycopg.errors.FeatureNotSupported):
             connection.execute(
@@ -1767,8 +2062,8 @@ def test_admission_receipt_conflicts_roll_back_atomically_and_is_append_only() -
     colliding_parameters = _admission_parameters(admission_snapshot_id=snapshot_id)
     colliding_tenant_id = colliding_parameters[0]
     colliding_thread_id = colliding_parameters[1]
-    colliding_run_id = colliding_parameters[16]
-    colliding_event_id = colliding_parameters[29]
+    colliding_run_id = colliding_parameters[17]
+    colliding_event_id = colliding_parameters[30]
     with psycopg.connect(TEST_DSN) as connection:
         with pytest.raises(psycopg.errors.UniqueViolation):
             connection.execute(ADMIT_RUNTIME_RUN_SQL, colliding_parameters).fetchone()
@@ -1829,6 +2124,9 @@ def test_admission_receipt_conflicts_roll_back_atomically_and_is_append_only() -
                 ) IS NULL,
                 TO_REGPROCEDURE(
                     'deer_runtime.admit_runtime_run(uuid,uuid,uuid,uuid,uuid,uuid,uuid,uuid,bigint,varchar,varchar,uuid,uuid,uuid,uuid,jsonb,uuid,bigint,varchar,varchar,character,varchar,uuid,varchar,varchar,varchar,varchar,uuid,character,uuid,jsonb)'
+                ) IS NULL,
+                TO_REGPROCEDURE(
+                    'deer_runtime.admit_runtime_run(uuid,uuid,uuid,uuid,uuid,uuid,varchar,uuid,uuid,bigint,varchar,varchar,uuid,uuid,uuid,uuid,jsonb,uuid,bigint,varchar,varchar,character,varchar,uuid,varchar,varchar,varchar,varchar,uuid,character,uuid,jsonb)'
                 ) IS NOT NULL,
                 TO_REGPROCEDURE(
                     'deer_runtime.select_next_runtime_run_candidate(varchar,varchar)'
@@ -1838,7 +2136,7 @@ def test_admission_receipt_conflicts_roll_back_atomically_and_is_append_only() -
                 ) IS NOT NULL
             """
         ).fetchone()
-        assert signatures == (True, True, True, True)
+        assert signatures == (True, True, True, True, True)
 
 
 def test_admission_serializes_competing_threads_for_one_step_revision() -> None:
@@ -1901,7 +2199,7 @@ def test_only_bound_v22_runs_can_be_discovered_claimed_taken_over_or_loaded() ->
         agent_name=agent_name,
     )
     tenant_id = bound_parameters[0]
-    bound_run_id = bound_parameters[16]
+    bound_run_id = bound_parameters[17]
     legacy_tenant_id = uuid4()
     legacy_thread_id = uuid4()
     legacy_task_step_id = uuid4()
@@ -1913,11 +2211,11 @@ def test_only_bound_v22_runs_can_be_discovered_claimed_taken_over_or_loaded() ->
             """
             INSERT INTO deer_runtime.runtime_thread (
                 tenant_id, runtime_thread_id, task_run_id, task_step_id,
-                agent_instance_id, user_id, conversation_id, runtime_type,
+                agent_instance_id, user_id, source_kind, conversation_id, runtime_type,
                 runtime_agent_name, capability_version_id, prompt_version_id,
                 model_policy_id, budget_reservation_id
             ) VALUES (
-                %s, %s, %s, %s, %s, %s, %s, 'DEERFLOW', %s,
+                %s, %s, %s, %s, %s, %s, 'CONVERSATION', %s, 'DEERFLOW', %s,
                 %s, %s, %s, %s
             )
             """,
@@ -2013,11 +2311,11 @@ def test_only_bound_v22_runs_can_be_discovered_claimed_taken_over_or_loaded() ->
             """
             INSERT INTO deer_runtime.runtime_thread (
                 tenant_id, runtime_thread_id, task_run_id, task_step_id,
-                agent_instance_id, user_id, conversation_id, runtime_type,
+                agent_instance_id, user_id, source_kind, conversation_id, runtime_type,
                 runtime_agent_name, capability_version_id, prompt_version_id,
                 model_policy_id, budget_reservation_id
             ) VALUES (
-                %s, %s, %s, %s, %s, %s, %s, 'DEERFLOW', %s,
+                %s, %s, %s, %s, %s, %s, 'CONVERSATION', %s, 'DEERFLOW', %s,
                 %s, %s, %s, %s
             )
             """,
@@ -2473,7 +2771,7 @@ def test_execution_and_cancellation_authority_are_state_and_fence_exclusive() ->
     runtime_thread_id = admission_parameters[1]
     task_run_id = admission_parameters[2]
     task_step_id = admission_parameters[3]
-    runtime_run_id = admission_parameters[16]
+    runtime_run_id = admission_parameters[17]
     cancel_request_id = uuid4()
 
     with psycopg.connect(TEST_DSN, row_factory=dict_row) as connection:
@@ -2508,6 +2806,7 @@ def test_execution_and_cancellation_authority_are_state_and_fence_exclusive() ->
             "agent_instance_id",
             "user_id",
             "conversation_id",
+            "source_kind",
             "source_message_id",
             "runtime_thread_revision",
             "runtime_type",
@@ -2536,31 +2835,32 @@ def test_execution_and_cancellation_authority_are_state_and_fence_exclusive() ->
             "runtime_thread_id": runtime_thread_id,
             "task_run_id": task_run_id,
             "task_step_id": task_step_id,
-            "task_execution_generation": admission_parameters[17],
+            "task_execution_generation": admission_parameters[18],
             "agent_instance_id": admission_parameters[4],
             "user_id": admission_parameters[5],
-            "conversation_id": admission_parameters[6],
-            "source_message_id": admission_parameters[7],
-            "runtime_thread_revision": admission_parameters[8],
-            "runtime_type": admission_parameters[9],
-            "runtime_agent_name": admission_parameters[10],
-            "capability_version_id": admission_parameters[11],
-            "prompt_version_id": admission_parameters[12],
-            "model_policy_id": admission_parameters[13],
-            "budget_reservation_id": admission_parameters[14],
-            "operation_kind": admission_parameters[18],
-            "multitask_strategy": admission_parameters[19],
-            "request_hash": admission_parameters[20],
-            "idempotency_key": admission_parameters[21],
-            "predecessor_runtime_run_id": admission_parameters[22],
-            "expected_checkpoint_id": admission_parameters[23],
-            "runtime_version": admission_parameters[24],
-            "agent_name": admission_parameters[25],
+            "source_kind": admission_parameters[6],
+            "conversation_id": admission_parameters[7],
+            "source_message_id": admission_parameters[8],
+            "runtime_thread_revision": admission_parameters[9],
+            "runtime_type": admission_parameters[10],
+            "runtime_agent_name": admission_parameters[11],
+            "capability_version_id": admission_parameters[12],
+            "prompt_version_id": admission_parameters[13],
+            "model_policy_id": admission_parameters[14],
+            "budget_reservation_id": admission_parameters[15],
+            "operation_kind": admission_parameters[19],
+            "multitask_strategy": admission_parameters[20],
+            "request_hash": admission_parameters[21],
+            "idempotency_key": admission_parameters[22],
+            "predecessor_runtime_run_id": admission_parameters[23],
+            "expected_checkpoint_id": admission_parameters[24],
+            "runtime_version": admission_parameters[25],
+            "agent_name": admission_parameters[26],
             "lease_owner": "worker-authority",
             "lease_epoch": 1,
-            "admission_contract_version": admission_parameters[26],
-            "admission_snapshot_id": admission_parameters[27],
-            "admission_snapshot_hash": admission_parameters[28],
+            "admission_contract_version": admission_parameters[27],
+            "admission_snapshot_id": admission_parameters[28],
+            "admission_snapshot_hash": admission_parameters[29],
         }
         assert connection.execute(
             """

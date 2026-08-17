@@ -30,6 +30,8 @@ from dianlian_runtime.supervisor.contracts import (
     FinishRuntimeRunCancellationRequest,
     FrozenJsonObject,
     LoadRuntimeExecutionAuthorityRequest,
+    LoadRuntimeH12CheckpointRequest,
+    LoadRuntimeStructuredCheckpointRequest,
     IssueRuntimeExternalPermitRequest,
     LoadRuntimeExternalOperationBarrierRequest,
     PrimitiveOutcome,
@@ -46,10 +48,13 @@ from dianlian_runtime.supervisor.contracts import (
     RuntimeExternalOperationAttemptFact,
     RuntimeExternalOperationBarrierFact,
     RuntimeExternalPermitFact,
+    RuntimeH12CheckpointFact,
+    RuntimeStructuredCheckpointFact,
     RuntimeRunCandidateFact,
     RuntimeRunControlFact,
     RuntimeRunEventFact,
     RuntimeRunFact,
+    RuntimeSourceKind,
     SupervisorCommandConflict,
     SupervisorErrorCode,
     SupervisorIntegrityOrContractViolation,
@@ -64,6 +69,8 @@ from dianlian_runtime.supervisor.contracts import (
     TakeoverRuntimeRunRequest,
     SelectNextRuntimeRunCandidateRequest,
     RuntimeStatus,
+    SaveRuntimeH12CheckpointRequest,
+    SaveRuntimeStructuredCheckpointRequest,
     OperationKind,
     MultitaskStrategy,
 )
@@ -103,7 +110,7 @@ cancel_requested_at
 _EXECUTION_AUTHORITY_COLUMNS = """
 tenant_id, runtime_run_id, runtime_thread_id, task_run_id, task_step_id,
 task_execution_generation, agent_instance_id, user_id, conversation_id,
-source_message_id, runtime_thread_revision, runtime_type, runtime_agent_name,
+source_kind, source_message_id, runtime_thread_revision, runtime_type, runtime_agent_name,
 capability_version_id, prompt_version_id, model_policy_id,
 budget_reservation_id, operation_kind, multitask_strategy, request_hash,
 idempotency_key, predecessor_runtime_run_id, expected_checkpoint_id,
@@ -130,6 +137,57 @@ _EXTERNAL_OPERATION_BARRIER_COLUMNS = """
 tenant_id, runtime_run_id, task_execution_generation, lease_owner, lease_epoch,
 dispatch_armed_count, outcome_unknown_count, blocking, oldest_blocking_at
 """
+_H12_CHECKPOINT_COLUMNS = """
+tenant_id, runtime_run_id, task_execution_generation, checkpoint_id,
+previous_checkpoint_id, state_version, state_json, state_hash, transition_code,
+event_id, created_by, lease_epoch, created_at
+"""
+_CHECK_H12_CHECKPOINT_CAPABILITY_SQL = """
+WITH routines AS (
+    SELECT
+        pg_catalog.to_regprocedure(
+            'deer_runtime.load_runtime_h12_checkpoint(uuid,uuid,bigint,varchar,bigint)'
+        ) AS load_routine,
+        pg_catalog.to_regprocedure(
+            'deer_runtime.save_runtime_h12_checkpoint(uuid,uuid,bigint,varchar,bigint,varchar,bigint,uuid,varchar,varchar,jsonb)'
+        ) AS save_routine
+)
+SELECT COALESCE(
+    load_routine IS NOT NULL
+    AND save_routine IS NOT NULL
+    AND pg_catalog.has_function_privilege(
+        CURRENT_USER,
+        load_routine,
+        'EXECUTE'
+    )
+    AND pg_catalog.has_function_privilege(
+        CURRENT_USER,
+        save_routine,
+        'EXECUTE'
+    ),
+    FALSE
+) AS ready
+FROM routines
+"""
+_CHECK_STRUCTURED_CHECKPOINT_CAPABILITY_SQL = """
+WITH routines AS (
+    SELECT
+        pg_catalog.to_regprocedure(
+            'deer_runtime.load_runtime_structured_checkpoint(uuid,uuid,bigint,varchar,bigint)'
+        ) AS load_routine,
+        pg_catalog.to_regprocedure(
+            'deer_runtime.save_runtime_structured_checkpoint(uuid,uuid,bigint,varchar,bigint,varchar,bigint,uuid,varchar,varchar,jsonb)'
+        ) AS save_routine
+)
+SELECT COALESCE(
+    load_routine IS NOT NULL
+    AND save_routine IS NOT NULL
+    AND pg_catalog.has_function_privilege(CURRENT_USER, load_routine, 'EXECUTE')
+    AND pg_catalog.has_function_privilege(CURRENT_USER, save_routine, 'EXECUTE'),
+    FALSE
+) AS ready
+FROM routines
+"""
 
 
 _SELECT_CANDIDATE_SQL = """
@@ -139,7 +197,7 @@ _ADMIT_SQL = """
 SELECT {run_columns} FROM deer_runtime.admit_runtime_run(
     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-    %s, %s, %s
+    %s, %s, %s, %s
 )
 """.format(run_columns=_RUN_COLUMNS)
 _CLAIM_SQL = """
@@ -198,6 +256,26 @@ _LOAD_EXTERNAL_OPERATION_BARRIER_SQL = """
 SELECT {barrier_columns}
 FROM deer_runtime.load_runtime_external_operation_barrier(%s, %s, %s, %s, %s)
 """.format(barrier_columns=_EXTERNAL_OPERATION_BARRIER_COLUMNS)
+_LOAD_H12_CHECKPOINT_SQL = """
+SELECT {checkpoint_columns}
+FROM deer_runtime.load_runtime_h12_checkpoint(%s, %s, %s, %s, %s)
+""".format(checkpoint_columns=_H12_CHECKPOINT_COLUMNS)
+_SAVE_H12_CHECKPOINT_SQL = """
+SELECT {checkpoint_columns}
+FROM deer_runtime.save_runtime_h12_checkpoint(
+    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+)
+""".format(checkpoint_columns=_H12_CHECKPOINT_COLUMNS)
+_LOAD_STRUCTURED_CHECKPOINT_SQL = """
+SELECT {checkpoint_columns}
+FROM deer_runtime.load_runtime_structured_checkpoint(%s, %s, %s, %s, %s)
+""".format(checkpoint_columns=_H12_CHECKPOINT_COLUMNS)
+_SAVE_STRUCTURED_CHECKPOINT_SQL = """
+SELECT {checkpoint_columns}
+FROM deer_runtime.save_runtime_structured_checkpoint(
+    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+)
+""".format(checkpoint_columns=_H12_CHECKPOINT_COLUMNS)
 _APPEND_EVENT_SQL = """
 SELECT {event_columns} FROM deer_runtime.append_runtime_run_event(
     %s, %s, %s, %s, %s, %s, %s, %s
@@ -271,6 +349,7 @@ class PostgresRunSupervisorRepository:
                 request.task_step_id,
                 request.agent_instance_id,
                 request.user_id,
+                request.source_kind.value,
                 request.conversation_id,
                 request.source_message_id,
                 request.runtime_thread_revision,
@@ -514,6 +593,102 @@ class PostgresRunSupervisorRepository:
                 request.lease_epoch,
             ),
             _map_runtime_external_operation_barrier,
+        )
+
+    def load_h12_checkpoint(
+        self,
+        request: LoadRuntimeH12CheckpointRequest,
+    ) -> PrimitiveResult[RuntimeH12CheckpointFact]:
+        return self._execute_read_one(
+            SupervisorPrimitive.LOAD_H12_CHECKPOINT,
+            _LOAD_H12_CHECKPOINT_SQL,
+            (
+                request.tenant_id,
+                request.runtime_run_id,
+                request.task_execution_generation,
+                request.lease_owner,
+                request.lease_epoch,
+            ),
+            _map_runtime_h12_checkpoint,
+        )
+
+    def check_h12_checkpoint_capability(self) -> PrimitiveResult[bool]:
+        return self._execute_read_one(
+            SupervisorPrimitive.CHECK_H12_CHECKPOINT_CAPABILITY,
+            _CHECK_H12_CHECKPOINT_CAPABILITY_SQL,
+            (),
+            _map_h12_checkpoint_capability,
+        )
+
+    def save_h12_checkpoint(
+        self,
+        request: SaveRuntimeH12CheckpointRequest,
+    ) -> PrimitiveResult[RuntimeH12CheckpointFact]:
+        return self._execute_one(
+            SupervisorPrimitive.SAVE_H12_CHECKPOINT,
+            _SAVE_H12_CHECKPOINT_SQL,
+            (
+                request.tenant_id,
+                request.runtime_run_id,
+                request.task_execution_generation,
+                request.lease_owner,
+                request.lease_epoch,
+                request.expected_checkpoint_id,
+                request.expected_state_version,
+                request.event_id,
+                request.checkpoint_id,
+                request.transition_code,
+                Jsonb(request.state.to_builtin()),
+            ),
+            _map_runtime_h12_checkpoint,
+        )
+
+    def load_structured_checkpoint(
+        self,
+        request: LoadRuntimeStructuredCheckpointRequest,
+    ) -> PrimitiveResult[RuntimeStructuredCheckpointFact]:
+        return self._execute_read_one(
+            SupervisorPrimitive.LOAD_STRUCTURED_CHECKPOINT,
+            _LOAD_STRUCTURED_CHECKPOINT_SQL,
+            (
+                request.tenant_id,
+                request.runtime_run_id,
+                request.task_execution_generation,
+                request.lease_owner,
+                request.lease_epoch,
+            ),
+            _map_runtime_structured_checkpoint,
+        )
+
+    def check_structured_checkpoint_capability(self) -> PrimitiveResult[bool]:
+        return self._execute_read_one(
+            SupervisorPrimitive.CHECK_STRUCTURED_CHECKPOINT_CAPABILITY,
+            _CHECK_STRUCTURED_CHECKPOINT_CAPABILITY_SQL,
+            (),
+            _map_h12_checkpoint_capability,
+        )
+
+    def save_structured_checkpoint(
+        self,
+        request: SaveRuntimeStructuredCheckpointRequest,
+    ) -> PrimitiveResult[RuntimeStructuredCheckpointFact]:
+        return self._execute_one(
+            SupervisorPrimitive.SAVE_STRUCTURED_CHECKPOINT,
+            _SAVE_STRUCTURED_CHECKPOINT_SQL,
+            (
+                request.tenant_id,
+                request.runtime_run_id,
+                request.task_execution_generation,
+                request.lease_owner,
+                request.lease_epoch,
+                request.expected_checkpoint_id,
+                request.expected_state_version,
+                request.event_id,
+                request.checkpoint_id,
+                request.transition_code,
+                Jsonb(request.state.to_builtin()),
+            ),
+            _map_runtime_structured_checkpoint,
         )
 
     def append_event(
@@ -991,7 +1166,8 @@ def _map_runtime_execution_authority(
         task_execution_generation=_integer(row, "task_execution_generation"),
         agent_instance_id=_uuid(row, "agent_instance_id"),
         user_id=_uuid(row, "user_id"),
-        conversation_id=_uuid(row, "conversation_id"),
+        conversation_id=_optional_uuid(row, "conversation_id"),
+        source_kind=RuntimeSourceKind(_text(row, "source_kind")),
         source_message_id=_optional_uuid(row, "source_message_id"),
         runtime_thread_revision=_integer(row, "runtime_thread_revision"),
         runtime_type=_text(row, "runtime_type"),
@@ -1109,6 +1285,50 @@ def _map_runtime_external_operation_barrier(
         blocking=_boolean(row, "blocking"),
         oldest_blocking_at=_optional_utc_datetime(row, "oldest_blocking_at"),
     )
+
+
+def _map_runtime_h12_checkpoint(
+    row: Mapping[str, Any],
+) -> RuntimeH12CheckpointFact:
+    return RuntimeH12CheckpointFact(
+        tenant_id=_uuid(row, "tenant_id"),
+        runtime_run_id=_uuid(row, "runtime_run_id"),
+        task_execution_generation=_integer(row, "task_execution_generation"),
+        checkpoint_id=_text(row, "checkpoint_id"),
+        previous_checkpoint_id=_optional_text(row, "previous_checkpoint_id"),
+        state_version=_integer(row, "state_version"),
+        state=FrozenJsonObject(_mapping(row, "state_json")),
+        state_hash=_text(row, "state_hash"),
+        transition_code=_text(row, "transition_code"),
+        event_id=_uuid(row, "event_id"),
+        created_by=_text(row, "created_by"),
+        lease_epoch=_integer(row, "lease_epoch"),
+        created_at=_utc_datetime(row, "created_at"),
+    )
+
+
+def _map_runtime_structured_checkpoint(
+    row: Mapping[str, Any],
+) -> RuntimeStructuredCheckpointFact:
+    return RuntimeStructuredCheckpointFact(
+        tenant_id=_uuid(row, "tenant_id"),
+        runtime_run_id=_uuid(row, "runtime_run_id"),
+        task_execution_generation=_integer(row, "task_execution_generation"),
+        checkpoint_id=_text(row, "checkpoint_id"),
+        previous_checkpoint_id=_optional_text(row, "previous_checkpoint_id"),
+        state_version=_integer(row, "state_version"),
+        state=FrozenJsonObject(_mapping(row, "state_json")),
+        state_hash=_text(row, "state_hash"),
+        transition_code=_text(row, "transition_code"),
+        event_id=_uuid(row, "event_id"),
+        created_by=_text(row, "created_by"),
+        lease_epoch=_integer(row, "lease_epoch"),
+        created_at=_utc_datetime(row, "created_at"),
+    )
+
+
+def _map_h12_checkpoint_capability(row: Mapping[str, Any]) -> bool:
+    return _boolean(row, "ready")
 
 
 def _map_runtime_event(row: Mapping[str, Any]) -> RuntimeRunEventFact:

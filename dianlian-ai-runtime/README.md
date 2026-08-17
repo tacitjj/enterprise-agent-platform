@@ -26,9 +26,16 @@
   跨进程 claim 并从 checkpoint 接管执行的公共入口，生产 takeover 与能力路由
   均保持关闭。
 
-当前节点不交付：
+当前节点也提供默认关闭的 governed H12 `agent-worker` 组合入口。它只在显式开启时
+装配 Run Supervisor、ADMISSION/MODEL/TOOL permit issuer、受治理 Java gateway、
+H12 durable slots 和完整 INITIAL -> TOOL -> AFTER_TOOL Driver；不会回退到旧 H1/H12
+链路。Run、租约、permit、dispatch arm 和 canonical outcome 仍由 PostgreSQL
+Supervisor 与 Java 权威事实共同约束。
 
-- 生产级 DeerFlow Run Supervisor 或跨进程 checkpoint takeover。
+当前节点仍不交付：
+
+- DeerFlow Harness H0/H1 的生产级 Supervisor；governed H12 Worker 是独立的
+  默认关闭执行路径。
 - 向量索引、GraphRAG、模型答案或业务数据库直读。
 - 任何假 Run、假事件或假成功结果。
 
@@ -49,6 +56,80 @@ Python 只接收 `DIANLIAN_SERVICE_JWT_PUBLIC_KEY_RING_JSON` 指向的静态公�
 配置形态为 `kid -> 绝对 PEM 文件路径`。公钥环缺失或无效时存活探针保持可用，
 就绪探针和受保护接口失败关闭。密钥轮换、固定 issuer/audience 与 60 秒 TTL 上限
 见 `docs/adr/ADR-043-内部服务采用专用RS256-Service-JWT.md`。
+
+## Governed H12 agent-worker（默认关闭）
+
+`DIANLIAN_GOVERNED_H12_DRIVER_ENABLED` 默认 `false`。开启时进程角色必须是
+`agent-worker`，并同时开启 agent 与 Run Supervisor；配置缺失会在启动前失败，
+不会静默退回 legacy model/tool endpoint。`DIANLIAN_RUN_SUPERVISOR_AGENT_NAME`
+必须与 Java 准入时冻结的 `agentName` 精确一致，不能使用代码默认值猜测。
+
+H12 durable slots 默认使用 `postgres` 后端，通过 Supervisor migration 016 的
+current-fenced 整文档 CAS 原语追加不可变 checkpoint。`local` 后端保留给本地开发，
+且只允许在 `DIANLIAN_RUNTIME_ENVIRONMENT=local` 时显式选择；staging/production
+选择 SQLite 会在启动阶段失败，PostgreSQL 后端反向拒绝本地数据目录。
+
+Supervisor DSN 必须是只继承 `dianlian_supervisor_executor` 的独立登录，不能复用
+permit/dispatch/outcome HTTP capability DSN。checkpoint 只保存受治理 intent、
+无密钥 exact receipt、显式 dispatch binding 与收敛状态，不保存 JWT、供应商凭证
+或业务权威数据。以下是本地 SQLite 开发配置；省略 backend 时默认 PostgreSQL：
+
+```bash
+DIANLIAN_RUNTIME_ROLE=agent-worker \
+DIANLIAN_RUNTIME_ENVIRONMENT=local \
+DIANLIAN_RUNTIME_VERSION='<admitted-runtime-version>' \
+DIANLIAN_AGENT_ENABLED=true \
+DIANLIAN_RUN_SUPERVISOR_ENABLED=true \
+DIANLIAN_GOVERNED_H12_DRIVER_ENABLED=true \
+DIANLIAN_GOVERNED_H12_STORE_BACKEND=local \
+DIANLIAN_RUN_SUPERVISOR_DATABASE_DSN='<injected-executor-dsn>' \
+DIANLIAN_RUN_SUPERVISOR_AGENT_NAME='<admitted-agent-name>' \
+DIANLIAN_RUN_SUPERVISOR_LEASE_SECONDS=30 \
+DIANLIAN_GOVERNED_H12_DATA_DIR='/var/lib/dianlian/governed-h12' \
+DIANLIAN_GOVERNED_H12_PERMIT_TTL_SECONDS=10 \
+DIANLIAN_RUNTIME_MODEL_SERVICE_BASE_URL='https://java-internal.example' \
+DIANLIAN_RUNTIME_MODEL_SERVICE_JWT_KEY_ID='<kid>' \
+DIANLIAN_RUNTIME_MODEL_SERVICE_JWT_PRIVATE_KEY_PATH='/run/secrets/runtime-private.pem' \
+uv run uvicorn dianlian_runtime.app:create_app --factory --host 127.0.0.1 --port 8091
+```
+
+数据库连接、语句和行锁等待分别由
+`DIANLIAN_RUN_SUPERVISOR_DATABASE_*_TIMEOUT_SECONDS` 限制。permit TTL 必须短于
+Run lease；任何数据库、JWT、Java gateway 或 durable receipt 不确定结果都按既有
+reconciliation 语义失败关闭，不授权 Provider/Tool 重发。PostgreSQL 后端在 Driver 启动前
+还会验证当前 executor 登录能解析并执行 migration 016 的 load/save 两个受限函数；迁移或
+权限未就绪时进程不会进入 ready。
+
+## Structured 3.0 agent-worker（默认关闭）
+
+`DIANLIAN_STRUCTURED_DRIVER_ENABLED` 默认 `false`，并与
+`DIANLIAN_GOVERNED_H12_DRIVER_ENABLED` 强制互斥。它只领取
+`TASK_STEP / 3.0 / JAVA_CAPABILITY_STRUCTURED` Run，使用 Supervisor migration 023 的
+PostgreSQL append-only checkpoint 原语持久化 Java 权威 Manifest 与无密钥 exact receipt；
+不支持本地 SQLite，也不会回退到 H12、Tool 或普通模型入口。
+
+该组合入口只有在依赖完整时才能启动：agent-worker、Run Supervisor executor DSN、与 Java
+Admission 精确一致的 agent name、内部 Java URL 以及只签发单 scope JWT 的密钥。示例仅表示
+配置契约，仓库和部署清单不默认开启：
+
+```bash
+DIANLIAN_RUNTIME_ROLE=agent-worker \
+DIANLIAN_RUNTIME_VERSION='<admitted-runtime-version>' \
+DIANLIAN_AGENT_ENABLED=true \
+DIANLIAN_RUN_SUPERVISOR_ENABLED=true \
+DIANLIAN_STRUCTURED_DRIVER_ENABLED=true \
+DIANLIAN_RUN_SUPERVISOR_DATABASE_DSN='<injected-executor-dsn>' \
+DIANLIAN_RUN_SUPERVISOR_AGENT_NAME='<admitted-structured-agent-name>' \
+DIANLIAN_RUN_SUPERVISOR_LEASE_SECONDS=30 \
+DIANLIAN_STRUCTURED_DRIVER_PERMIT_TTL_SECONDS=10 \
+DIANLIAN_RUNTIME_MODEL_SERVICE_BASE_URL='https://java-internal.example' \
+DIANLIAN_RUNTIME_MODEL_SERVICE_JWT_KEY_ID='<kid>' \
+DIANLIAN_RUNTIME_MODEL_SERVICE_JWT_PRIVATE_KEY_PATH='/run/secrets/runtime-private.pem' \
+uv run uvicorn dianlian_runtime.app:create_app --factory --host 127.0.0.1 --port 8091
+```
+
+Driver 启动时先验证 migration 023 的 executor capability；未 ready、current fence 失效、Permit
+或 Java 返回不确定时只进入收敛态，不授权重复 Provider 调用，也不释放模型候选正文。
 
 ## Supervisor permit authorizer（默认关闭）
 
@@ -75,6 +156,153 @@ uv run uvicorn dianlian_runtime.app:create_app --factory --host 127.0.0.1 --port
 wrapper，不能执行旧 consume、不能创建 schema 对象，也不能直接访问 Run 与三张
 permit 表。连接、语句和行锁等待均有独立上限；任何权限、迁移、数据库或结果契约
 异常都会使 authorizer 失败关闭。DSN 不进入 settings 的 `repr`。
+
+## Supervisor dispatch authorizer（默认关闭）
+
+`POST /internal/v1/runtime-supervisor/external-dispatches/consume-and-arm`
+只负责原子消费 `MODEL_INVOKE` 或 `TOOL_INVOKE` permit，并为该外部调用建立一次性
+dispatch arm。它要求只包含 `runtime.external-dispatch.arm` 的独立 Service JWT；
+请求体不接受 `armedBy`，该值只从验签后的 principal subject 派生。响应为
+`{decision, grantFact}`：`decision` 是 `GRANTED_NOW`、`DO_NOT_DISPATCH` 或
+`NOT_APPLIED`；`NOT_APPLIED` 必须不带事实，其余决策必须带与请求完整绑定的当前
+operation attempt 事实。只有 `GRANTED_NOW + DISPATCH_ARMED` 的精确事实，并且调用方
+随后赢得本地耐久 Arm CAS，才允许发起外部调用。`DO_NOT_DISPATCH` 只用于按既有事实
+收敛，永不授权再次派发；所有 `NOT_APPLIED`、非 200、超时、断连或坏响应也都必须
+失败关闭。
+
+该路由默认不注册，也不会自动接入 H1、Java、模型或工具链路。启用前必须已应用
+Supervisor migration `012`，并为进程注入只继承
+`dianlian_supervisor_dispatch_authorizer` 的独立登录 DSN；不得复用 permit authorizer
+DSN：
+
+```bash
+DIANLIAN_DISPATCH_AUTHORIZER_ENABLED=true \
+DIANLIAN_DISPATCH_AUTHORIZER_DATABASE_DSN='<injected-dispatch-authorizer-dsn>' \
+DIANLIAN_DISPATCH_AUTHORIZER_DATABASE_CONNECT_TIMEOUT_SECONDS=5 \
+DIANLIAN_DISPATCH_AUTHORIZER_DATABASE_STATEMENT_TIMEOUT_SECONDS=5 \
+DIANLIAN_DISPATCH_AUTHORIZER_DATABASE_LOCK_TIMEOUT_SECONDS=5 \
+DIANLIAN_SERVICE_JWT_PUBLIC_KEY_RING_JSON='{"<kid>":"/absolute/path/to/public-key.pem"}' \
+uv run uvicorn dianlian_runtime.app:create_app --factory --host 127.0.0.1 --port 8091
+```
+
+readiness 会校验登录角色只有 arm wrapper 的执行权，没有其它 `deer_runtime` 函数、
+表、列、序列或 schema create 权限。该 capability/readiness 权限模型当前以
+PostgreSQL 17 为已验证基线；连接、语句和行锁等待使用独立上限，DSN 不进入
+settings 的 `repr`。
+
+## Supervisor outcome reconciler（默认关闭）
+
+`POST /internal/v1/runtime-supervisor/external-operation-outcomes/record` 与
+`POST /internal/v1/runtime-supervisor/external-operation-outcomes/reconcile` 分别要求
+exact-single scope `runtime.external-outcome.record` 和
+`runtime.external-outcome.reconcile`。请求体不接受 `evidenceKind` 或 `recordedBy`：
+前者由 Python 固定为 `JAVA_CANONICAL_FACT`，后者只从验签后的 principal subject
+派生。两路响应都只有 `outcome: APPLIED|NOT_APPLIED`，不会返回 Supervisor 事实，
+也不会自动接入 Java、H1、模型或工具链路。
+
+两条路由默认不注册。启用前必须已应用 Supervisor migration `012`，并为进程注入
+只继承 `dianlian_supervisor_outcome_reconciler` 的独立登录 DSN：
+
+```bash
+DIANLIAN_OUTCOME_RECONCILER_ENABLED=true \
+DIANLIAN_OUTCOME_RECONCILER_DATABASE_DSN='<injected-outcome-reconciler-dsn>' \
+DIANLIAN_OUTCOME_RECONCILER_DATABASE_CONNECT_TIMEOUT_SECONDS=5 \
+DIANLIAN_OUTCOME_RECONCILER_DATABASE_STATEMENT_TIMEOUT_SECONDS=5 \
+DIANLIAN_OUTCOME_RECONCILER_DATABASE_LOCK_TIMEOUT_SECONDS=5 \
+DIANLIAN_SERVICE_JWT_PUBLIC_KEY_RING_JSON='{"<kid>":"/absolute/path/to/public-key.pem"}' \
+uv run uvicorn dianlian_runtime.app:create_app --factory --host 127.0.0.1 --port 8091
+```
+
+readiness 会要求该登录精确且仅能执行 record/reconcile 两个 wrapper，不能拥有其它
+`deer_runtime` 函数、表、列、序列或 schema create 权限。连接、语句和锁等待使用
+独立上限，DSN 不进入 settings 的 `repr`。
+
+## Supervisor Run admitter（默认关闭）
+
+`POST /internal/v1/runtime-supervisor/run-admissions/admit` 只接收 Java 业务事务已经
+冻结并写入 outbox 的 32 字段 Run admission payload，要求 exact-single scope
+`runtime.run.admit`。请求显式区分 `CONVERSATION` 与 `TASK_STEP` 来源，并包含 Runtime
+Thread、任务/步骤、员工、用户、可选会话来源、部署版本、
+预算、输入 Artifact、admission snapshot、稳定幂等身份和受控 `RUN_ACCEPTED` 事件；
+Runtime 不从 HTTP principal 或默认值补造其中任何业务字段。响应只有
+`outcome: APPLIED|NOT_APPLIED`。提交响应丢失时，调用方只能重放同一持久 payload，
+不能重新生成 Run、Thread、事件或哈希。
+
+路由默认不注册；Java 已有独立且默认关闭的 lease-fenced outbox 投递 worker，但尚未
+生产启用，也未接现有 H1、模型、工具、角色流程或页面。启用前必须应用 migration
+`017`，并为 runtime-api 注入只继承 sealed
+`dianlian_supervisor_run_admitter` 的独立登录 DSN；不得复用 executor、permit、dispatch、
+outcome 或 controller DSN：
+
+```bash
+DIANLIAN_RUN_ADMITTER_ENABLED=true \
+DIANLIAN_RUN_ADMITTER_DATABASE_DSN='<injected-run-admitter-dsn>' \
+DIANLIAN_RUN_ADMITTER_DATABASE_CONNECT_TIMEOUT_SECONDS=5 \
+DIANLIAN_RUN_ADMITTER_DATABASE_STATEMENT_TIMEOUT_SECONDS=5 \
+DIANLIAN_RUN_ADMITTER_DATABASE_LOCK_TIMEOUT_SECONDS=5 \
+DIANLIAN_SERVICE_JWT_PUBLIC_KEY_RING_JSON='{"<kid>":"/absolute/path/to/public-key.pem"}' \
+uv run uvicorn dianlian_runtime.app:create_app --factory --host 127.0.0.1 --port 8091
+```
+
+readiness 会要求该登录只能执行 `admit_runtime_run`，不能拥有其它 `deer_runtime`
+函数、表、列、序列或 schema create 权限。该路由保留 32 KiB 流式请求上限，以覆盖
+当前最多 256 个 Artifact ID 的 exact payload；其它高权路由仍保持 8 KiB 上限。
+
+## Supervisor Run observer（默认关闭）
+
+`POST /internal/v1/runtime-supervisor/run-projections/read` 以一次数据库快照读取一个
+Run 的原生状态、终态/租约水位、Checkpoint 引用和有界连续事件页，要求
+exact-single scope `runtime.run.observe`。请求必须精确绑定 tenant、Run、任务步骤、
+执行代次、request hash 与事件游标；事件已经越过保留水位时返回显式 `replayGap`，
+不会把残缺事件页伪装成可继续投影。不存在与服务不可用分别返回 404 和 503。
+
+路由默认不注册，Java 的只读 client 也默认关闭；当前没有接入
+`TaskRuntimeSyncApplicationService`，不会替换现有 H1 snapshot/event 来源或触发双启动。
+启用前必须应用 migration `018`，并为 runtime-api 注入只继承 sealed
+`dianlian_supervisor_run_observer` 的独立登录 DSN；不得复用 executor、admitter、
+controller、permit、dispatch 或 outcome DSN：
+
+```bash
+DIANLIAN_RUN_OBSERVER_ENABLED=true \
+DIANLIAN_RUN_OBSERVER_DATABASE_DSN='<injected-run-observer-dsn>' \
+DIANLIAN_RUN_OBSERVER_DATABASE_CONNECT_TIMEOUT_SECONDS=5 \
+DIANLIAN_RUN_OBSERVER_DATABASE_STATEMENT_TIMEOUT_SECONDS=5 \
+DIANLIAN_RUN_OBSERVER_DATABASE_LOCK_TIMEOUT_SECONDS=5 \
+DIANLIAN_SERVICE_JWT_PUBLIC_KEY_RING_JSON='{"<kid>":"/absolute/path/to/public-key.pem"}' \
+uv run uvicorn dianlian_runtime.app:create_app --factory --host 127.0.0.1 --port 8091
+```
+
+readiness 会要求该登录只能执行 `read_runtime_run_projection`，不能拥有其它
+`deer_runtime` 函数、表、列、序列或 schema create 权限。该观察接口是原生
+Supervisor 投影边界，不复用旧 Java `RuntimeExecutionSnapshot` 的较窄状态枚举。
+
+## Supervisor Run controller（默认关闭）
+
+`POST /internal/v1/runtime-supervisor/run-cancellations/request` 只负责把 Java
+业务控制面已授权的取消意图写成 durable `runtime_run_control` 与 Run 事件。它要求
+exact-single scope `runtime.run.cancel`；请求体携带业务 actor、稳定 cancel request ID、
+Run version、幂等键和请求哈希，但不接受 `eventPayload`。事件载荷由 Runtime 固定生成，
+避免调用方自选审计事实。响应只有 `outcome: APPLIED|NOT_APPLIED`；它不表示取消已
+完成，后续仍由持有当前 fence 的 Supervisor worker 执行本地 quiesce、外部 operation
+barrier 检查并收敛为 `CANCELLED` 或 `CANCEL_OUTCOME_UNKNOWN`。
+
+路由默认不注册，也不接入公开任务 API。启用前必须应用 migration `015`，为
+runtime-api 注入只继承 `dianlian_supervisor_controller` 的独立登录 DSN；不得复用
+worker executor、permit、dispatch 或 outcome DSN：
+
+```bash
+DIANLIAN_RUN_CONTROLLER_ENABLED=true \
+DIANLIAN_RUN_CONTROLLER_DATABASE_DSN='<injected-controller-dsn>' \
+DIANLIAN_RUN_CONTROLLER_DATABASE_CONNECT_TIMEOUT_SECONDS=5 \
+DIANLIAN_RUN_CONTROLLER_DATABASE_STATEMENT_TIMEOUT_SECONDS=5 \
+DIANLIAN_RUN_CONTROLLER_DATABASE_LOCK_TIMEOUT_SECONDS=5 \
+DIANLIAN_SERVICE_JWT_PUBLIC_KEY_RING_JSON='{"<kid>":"/absolute/path/to/public-key.pem"}' \
+uv run uvicorn dianlian_runtime.app:create_app --factory --host 127.0.0.1 --port 8091
+```
+
+readiness 会要求该登录只能执行 `request_runtime_run_cancel`，不能拥有其它
+`deer_runtime` 函数、表、列、序列或 schema create 权限。migration `015` 同时从
+通用 executor 收回该函数，避免 worker DSN 被复用成外部控制通道。
 
 ## 数据库迁移
 
@@ -128,14 +356,14 @@ settings 的 `repr`，数据库不可用日志只记录异常类型。
 默认测试不需要数据库：
 
 ```bash
-uv run python -m pytest -q tests/test_retrieval.py tests/test_indexing.py tests/test_migrations.py
+uv run pytest -q tests/test_retrieval.py tests/test_indexing.py tests/test_migrations.py
 ```
 
 可选真实 PostgreSQL 测试必须使用专用测试库：
 
 ```bash
 DIANLIAN_TEST_CONTEXT_DATABASE_DSN='<dedicated-test-dsn>' \
-uv run python -m pytest -q tests/test_postgres_context.py
+uv run pytest -q tests/test_postgres_context.py
 ```
 
 功能只有在显式迁移、定向测试和故障门禁同时通过后，才能在目标环境设置

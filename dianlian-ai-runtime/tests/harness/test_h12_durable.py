@@ -327,3 +327,145 @@ def test_h12_rejects_secret_shaped_persisted_payloads(tmp_path: Path) -> None:
                     )
 
     asyncio.run(verify())
+
+
+def test_h12_serializes_writers_without_blocking_reads_and_isolates_rollback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def verify() -> None:
+        second_execution_id = UUID("22000000-0000-4000-8000-000000000098")
+        async with H12DurableSlots(tmp_path / "single-writer.db") as slots:
+            first_write_paused = asyncio.Event()
+            release_first_write = asyncio.Event()
+            original_load = slots._load_model_unlocked  # noqa: SLF001
+            pause_first_load = True
+
+            async def fail_first_load(database, execution_id, call_index):
+                nonlocal pause_first_load
+                if pause_first_load:
+                    pause_first_load = False
+                    first_write_paused.set()
+                    await release_first_write.wait()
+                    raise RuntimeError("force first writer rollback")
+                return await original_load(database, execution_id, call_index)
+
+            monkeypatch.setattr(slots, "_load_model_unlocked", fail_first_load)
+            first_write = asyncio.create_task(
+                slots.prepare_model(
+                    EXECUTION_ID,
+                    1,
+                    ModelPhase.TOOL_DECISION,
+                    _intent("model", 1),
+                )
+            )
+            await asyncio.wait_for(first_write_paused.wait(), timeout=1)
+
+            second_write = asyncio.create_task(
+                slots.prepare_model(
+                    second_execution_id,
+                    1,
+                    ModelPhase.TOOL_DECISION,
+                    {**_intent("model", 1), "executionId": str(second_execution_id)},
+                )
+            )
+            await asyncio.sleep(0)
+            assert not second_write.done()
+            uncommitted = await asyncio.wait_for(
+                slots.next_action(EXECUTION_ID),
+                timeout=1,
+            )
+            assert uncommitted.action == RecoveryAction.DISPATCH_MODEL_1
+            assert uncommitted.intent is None
+
+            release_first_write.set()
+            with pytest.raises(RuntimeError, match="force first writer rollback"):
+                await first_write
+            persisted = await asyncio.wait_for(second_write, timeout=1)
+            assert persisted.execution_id == second_execution_id
+            assert (
+                await slots.next_action(EXECUTION_ID)
+            ).action == RecoveryAction.DISPATCH_MODEL_1
+            assert (
+                await slots.require_model_intent(second_execution_id, 1)
+            ) == persisted
+
+    asyncio.run(verify())
+
+
+def test_h12_rolls_back_when_cancelled_after_begin_reaches_sqlite(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def verify() -> None:
+        async with H12DurableSlots(tmp_path / "cancelled-begin.db") as slots:
+            database = slots._require_database()  # noqa: SLF001
+            original_execute = database.execute
+            cancel_next_begin = True
+
+            async def cancel_after_begin(sql, parameters=None):
+                nonlocal cancel_next_begin
+                cursor = await original_execute(sql, parameters)
+                if sql == "BEGIN IMMEDIATE" and cancel_next_begin:
+                    cancel_next_begin = False
+                    raise asyncio.CancelledError
+                return cursor
+
+            monkeypatch.setattr(database, "execute", cancel_after_begin)
+            with pytest.raises(asyncio.CancelledError):
+                await slots.prepare_model(
+                    EXECUTION_ID,
+                    1,
+                    ModelPhase.TOOL_DECISION,
+                    _intent("model", 1),
+                )
+
+            persisted = await slots.prepare_model(
+                EXECUTION_ID,
+                1,
+                ModelPhase.TOOL_DECISION,
+                _intent("model", 1),
+            )
+            assert persisted.intent_id == stable_model_call_id(EXECUTION_ID, 1)
+
+    asyncio.run(verify())
+
+
+def test_h12_closes_connection_when_schema_initialization_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailingConnection:
+        row_factory = None
+        rolled_back = False
+        closed = False
+
+        async def executescript(self, script):
+            del script
+            raise RuntimeError("schema initialization failed")
+
+        async def rollback(self):
+            self.rolled_back = True
+
+        async def close(self):
+            self.closed = True
+
+    async def verify() -> None:
+        connection = FailingConnection()
+
+        async def connect(path):
+            del path
+            return connection
+
+        monkeypatch.setattr(
+            "dianlian_runtime.harness.h12_durable.aiosqlite.connect",
+            connect,
+        )
+        slots = H12DurableSlots(tmp_path / "schema-failure.db")
+        with pytest.raises(RuntimeError, match="schema initialization failed"):
+            await slots.__aenter__()
+        assert connection.rolled_back
+        assert connection.closed
+        assert slots._database is None  # noqa: SLF001
+
+    asyncio.run(verify())

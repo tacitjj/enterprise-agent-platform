@@ -126,6 +126,27 @@ SELECT
     ) AS has_no_relation_privileges,
     NOT EXISTS (
         SELECT 1
+          FROM pg_catalog.pg_class AS relation
+          JOIN pg_catalog.pg_namespace AS relation_namespace
+            ON relation_namespace.oid = relation.relnamespace
+          JOIN pg_catalog.pg_attribute AS relation_attribute
+            ON relation_attribute.attrelid = relation.oid
+          CROSS JOIN unnest(ARRAY[
+              'SELECT', 'INSERT', 'UPDATE', 'REFERENCES'
+          ]) AS requested_column_privilege(privilege_name)
+         WHERE relation_namespace.nspname = 'deer_runtime'
+           AND relation.relkind IN ('r', 'p', 'v', 'm', 'f')
+           AND relation_attribute.attnum > 0
+           AND NOT relation_attribute.attisdropped
+           AND has_column_privilege(
+               current_user,
+               relation.oid,
+               relation_attribute.attnum,
+               requested_column_privilege.privilege_name
+           )
+    ) AS has_no_column_privileges,
+    NOT EXISTS (
+        SELECT 1
           FROM pg_catalog.pg_class AS sequence_relation
           JOIN pg_catalog.pg_namespace AS sequence_namespace
             ON sequence_namespace.oid = sequence_relation.relnamespace
@@ -368,6 +389,7 @@ def _readiness_row_is_valid(row: Mapping[str, object] | None) -> bool:
         and row.get("can_execute_old_consume") is False
         and row.get("has_no_other_function_execute") is True
         and row.get("has_no_relation_privileges") is True
+        and row.get("has_no_column_privileges") is True
         and row.get("has_no_sequence_privileges") is True
     )
 

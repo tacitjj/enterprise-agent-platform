@@ -119,9 +119,15 @@ def _body() -> dict[str, object]:
 
 
 class RecordingAuthenticator:
-    def __init__(self, *, subject: str = "verified-java-service") -> None:
+    def __init__(
+        self,
+        *,
+        subject: str = "verified-java-service",
+        extra_scope: InternalServiceScope | None = None,
+    ) -> None:
         self.ready = True
         self.subject = subject
+        self.extra_scope = extra_scope
         self.required_scopes: list[InternalServiceScope] = []
 
     def authorize(self, token: str, required_scope: InternalServiceScope):
@@ -130,7 +136,10 @@ class RecordingAuthenticator:
         return InternalServicePrincipal(
             subject=self.subject,
             token_id=UUID("00000000-0000-4000-8000-000000000043"),
-            scopes=frozenset({required_scope}),
+            scopes=frozenset(
+                {required_scope}
+                | ({self.extra_scope} if self.extra_scope is not None else set())
+            ),
             issued_at=0,
             expires_at=60,
         )
@@ -197,6 +206,24 @@ def test_authorizer_endpoint_uses_exact_scope_and_verified_subject() -> None:
         "runtime.external-permit.authorize"
     ]
     assert operation["security"] == [{"InternalServiceBearer": []}]
+    assert "413" in operation["responses"]
+
+
+def test_high_authority_endpoint_rejects_a_multi_scope_principal() -> None:
+    service = RecordingService()
+    authenticator = RecordingAuthenticator(
+        extra_scope=InternalServiceScope.RUNTIME_EXTERNAL_DISPATCH_ARM
+    )
+    app = create_app(
+        _settings(enabled=True),
+        internal_service_authenticator=authenticator,
+        permit_authorization_service=service,
+    )
+
+    response = TestClient(app).post(ROUTE, json=_body())
+
+    assert response.status_code == 403
+    assert service.calls == []
 
 
 def test_not_applied_is_a_plain_200_without_permit_details() -> None:
@@ -380,6 +407,7 @@ def _valid_probe_row() -> dict[str, object]:
         "can_execute_old_consume": False,
         "has_no_other_function_execute": True,
         "has_no_relation_privileges": True,
+        "has_no_column_privileges": True,
         "has_no_sequence_privileges": True,
     }
 
@@ -444,9 +472,13 @@ def test_postgres_service_probes_only_restricted_current_wrapper() -> None:
     assert "rolbypassrls" in connection.statement
     assert "has_function_privilege" in connection.statement
     assert "has_table_privilege" in connection.statement
+    assert "has_column_privilege" in connection.statement
     assert "has_sequence_privilege" in connection.statement
     assert "has_schema_privilege" in connection.statement
     assert "pg_catalog.pg_class" in connection.statement
+    assert "pg_catalog.pg_attribute" in connection.statement
+    assert "relation_attribute.attnum > 0" in connection.statement
+    assert "NOT relation_attribute.attisdropped" in connection.statement
     for relation_name in (
         "runtime_run",
         "runtime_thread",
@@ -510,6 +542,7 @@ def test_postgres_factory_bounds_connect_statement_and_lock_waits(
         ("can_execute_old_consume", True),
         ("has_no_other_function_execute", False),
         ("has_no_relation_privileges", False),
+        ("has_no_column_privileges", False),
         ("has_no_sequence_privileges", False),
         ("is_executor", True),
     ],

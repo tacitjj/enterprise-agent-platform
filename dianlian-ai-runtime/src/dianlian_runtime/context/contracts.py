@@ -51,6 +51,16 @@ class ContextSourceState(StrEnum):
     FORBIDDEN = "FORBIDDEN"
 
 
+class ProjectionLocator(StrictInternalModel):
+    """由权威索引回执确认的投影切片位置，不冒充原文页码或视觉坐标。"""
+
+    index_profile: Annotated[
+        str,
+        StringConstraints(strict=True, pattern=r"^[a-z0-9][a-z0-9._-]{0,99}$"),
+    ] = Field(alias="indexProfile")
+    chunk_ordinal: int = Field(alias="chunkOrdinal", strict=True, ge=0)
+
+
 class AuthorizedKnowledgeResource(StrictInternalModel):
     tenant_id: UUID = Field(alias="tenantId")
     resource_id: UUID = Field(alias="resourceId")
@@ -179,6 +189,10 @@ class ContextEvidence(StrictInternalModel):
     content_hash: Sha256Hex = Field(alias="contentHash")
     score: float = Field(strict=True, ge=0, le=1)
     citation: NonBlankText = Field(max_length=1_000)
+    projection_locator: ProjectionLocator | None = Field(
+        alias="projectionLocator",
+        default=None,
+    )
 
     @model_validator(mode="after")
     def require_exact_chunk_content_hash(self) -> "ContextEvidence":
@@ -246,6 +260,15 @@ class ContextBundle(StrictInternalModel):
         evidence_ids = [item.evidence_id for item in knowledge + memory]
         if len(evidence_ids) != len(set(evidence_ids)):
             raise ValueError("evidenceId must be globally unique within ContextBundle")
+        all_evidence = knowledge + memory
+        if self.contract_version == "1.0" and any(
+            item.projection_locator is not None for item in all_evidence
+        ):
+            raise ValueError("1.0 context evidence cannot include projectionLocator")
+        if self.contract_version != "1.0" and any(
+            item.projection_locator is None for item in all_evidence
+        ):
+            raise ValueError("1.1+ context evidence requires projectionLocator")
         return self
 
 

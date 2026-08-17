@@ -1,9 +1,11 @@
 from copy import deepcopy
+from hashlib import sha256
 
 import pytest
 from fastapi.testclient import TestClient
 
 from dianlian_runtime.config import RuntimeSettings
+from dianlian_runtime.context.contracts import ContextBundle
 from tests.internal_auth_testkit import create_test_app
 
 
@@ -148,3 +150,53 @@ def test_unimplemented_memory_scopes_are_rejected(scope_type: str) -> None:
     )
 
     assert response.status_code == 422
+
+
+def test_projection_locator_is_versioned_without_breaking_legacy_context() -> None:
+    excerpt = "授权证据"
+    evidence = {
+        "evidenceId": "lexical:" + "a" * 64,
+        "sourceType": "KNOWLEDGE",
+        "sourceId": "70000000-0000-0000-0000-000000000001",
+        "sourceVersion": "80000000-0000-0000-0000-000000000001",
+        "chunkId": "a" * 64,
+        "title": "测试知识",
+        "excerpt": excerpt,
+        "contentHash": sha256(excerpt.encode("utf-8")).hexdigest(),
+        "score": 1.0,
+        "citation": "测试知识 / 版本 1",
+    }
+
+    def bundle(version: str, item: dict) -> dict:
+        return {
+            "contractVersion": version,
+            "requestId": "10000000-0000-0000-0000-000000000001",
+            "retrievalSnapshotId": "snapshot",
+            "generatedAt": "2026-08-12T12:00:00Z",
+            "knowledge": {"state": "READY", "reasonCode": None, "evidence": [item]},
+            "memory": {"state": "EMPTY", "reasonCode": "EMPTY", "evidence": []},
+            "retrievalTrace": {
+                "strategies": ["LEXICAL"],
+                "candidateCount": 1,
+                "rerankedCount": 0,
+                "indexVersion": "context-default-v1",
+                "elapsedMs": 1,
+            },
+        }
+
+    assert ContextBundle.model_validate(bundle("1.0", evidence)).knowledge.evidence[0].projection_locator is None
+    with pytest.raises(ValueError, match="requires projectionLocator"):
+        ContextBundle.model_validate(bundle("1.1", evidence))
+
+    located = deepcopy(evidence)
+    located["projectionLocator"] = {
+        "indexProfile": "context-default-v1",
+        "chunkOrdinal": 0,
+    }
+    assert (
+        ContextBundle.model_validate(bundle("1.1", located))
+        .knowledge.evidence[0]
+        .projection_locator
+        .chunk_ordinal
+        == 0
+    )

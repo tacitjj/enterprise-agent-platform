@@ -30,6 +30,17 @@ def test_supervisor_migrations_start_with_separate_history_ledger() -> None:
         "010",
         "011",
         "012",
+        "013",
+        "014",
+        "015",
+        "016",
+        "017",
+        "018",
+        "019",
+        "020",
+        "021",
+        "022",
+        "023",
     ]
     migration = migrations[0]
     assert migration.name == "000__migration_history.sql"
@@ -38,6 +49,164 @@ def test_supervisor_migrations_start_with_separate_history_ledger() -> None:
     assert "CREATE TABLE IF NOT EXISTS deer_runtime.schema_migration" in migration.sql
     assert "dianlian_context" not in migration.sql
     assert MIGRATION_LOCK_ID != CONTEXT_MIGRATION_LOCK_ID
+
+
+def test_run_admitter_boundary_removes_worker_admission_authority() -> None:
+    migration = next(
+        item for item in load_migrations() if item.version == "017"
+    ).sql
+
+    assert (
+        "dianlian_supervisor_run_admitter must be a sealed NOLOGIN NOINHERIT role"
+        in migration
+    )
+    assert (
+        "REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA deer_runtime\n"
+        "    FROM dianlian_supervisor_run_admitter"
+        in migration
+    )
+    assert "REVOKE ALL PRIVILEGES (%I) ON TABLE %I.%I" in migration
+    assert (
+        "REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA deer_runtime\n"
+        "    FROM dianlian_supervisor_run_admitter"
+        in migration
+    )
+    wrapper = "deer_runtime.admit_runtime_run("
+    assert migration.count(wrapper) >= 3
+    revoke_start = migration.index(f"REVOKE EXECUTE ON FUNCTION {wrapper}")
+    revoke_end = migration.index(";", revoke_start)
+    assert "dianlian_supervisor_executor" in migration[revoke_start:revoke_end]
+    grant_start = migration.index(f"GRANT EXECUTE ON FUNCTION {wrapper}")
+    grant_end = migration.index(";", grant_start)
+    assert (
+        ") TO dianlian_supervisor_run_admitter"
+        in migration[grant_start:grant_end]
+    )
+    assert "GRANT USAGE ON SCHEMA deer_runtime TO dianlian_supervisor_run_admitter" in migration
+    assert (
+        "Activation: no HTTP route, Java submitter, worker, model, tool, UI, or role flow is enabled"
+        in migration
+    )
+
+
+def test_run_observer_boundary_exposes_only_atomic_projection_read() -> None:
+    migration = next(
+        item for item in load_migrations() if item.version == "018"
+    ).sql
+
+    assert "dianlian_supervisor_run_observer must be a sealed NOLOGIN NOINHERIT role" in migration
+    assert "CREATE FUNCTION deer_runtime.read_runtime_run_projection(" in migration
+    assert "p_after_sequence < run.event_retention_floor_sequence - 1" in migration
+    assert "ORDER BY event_page.sequence_no" in migration
+    assert "LIMIT p_page_size" in migration
+    assert ") TO dianlian_supervisor_run_observer" in migration
+    assert "REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA deer_runtime" in migration
+    assert "REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA deer_runtime" in migration
+    assert migration.count("GRANT CREATE ON SCHEMA deer_runtime") == 1
+    assert migration.count("REVOKE CREATE ON SCHEMA deer_runtime") == 2
+    assert migration.index(
+        "GRANT CREATE ON SCHEMA deer_runtime TO dianlian_supervisor_routine_owner"
+    ) < migration.index("SET LOCAL ROLE dianlian_supervisor_routine_owner")
+    assert migration.index("SET LOCAL ROLE dianlian_supervisor_routine_owner") < migration.index(
+        "CREATE FUNCTION deer_runtime.read_runtime_run_projection("
+    )
+    assert migration.index("RESET ROLE") < migration.index(
+        "REVOKE CREATE ON SCHEMA deer_runtime FROM dianlian_supervisor_routine_owner"
+    )
+
+
+def test_admission_permit_takeover_recovery_keeps_dispatch_single_consume() -> None:
+    migration = next(
+        item for item in load_migrations() if item.version == "019"
+    ).sql
+
+    assert "DROP INDEX deer_runtime.uq_runtime_external_intent_consumed" in migration
+    assert "CREATE UNIQUE INDEX uq_runtime_external_dispatch_intent_consumed" in migration
+    assert "operation_kind IN ('MODEL_INVOKE', 'TOOL_INVOKE')" in migration
+    assert "CREATE UNIQUE INDEX uq_runtime_admission_intent_consumed_per_epoch" in migration
+    assert "operation_kind = 'ADMISSION_RESOLVE'" in migration
+    assert "intent_id, lease_epoch" in migration
+    assert "CREATE OR REPLACE FUNCTION deer_runtime.issue_runtime_external_permit(" in migration
+    assert "ORDER BY permit_attempt.permit_attempt DESC" in migration
+    assert "p_operation_kind <> 'ADMISSION_RESOLVE'" in migration
+    assert "p_lease_epoch <= v_attempt.lease_epoch" in migration
+    assert "MODEL_INVOKE and TOOL_INVOKE remain globally single-consume" in migration
+
+
+def test_structured_admission_compatibility_is_exact_and_keeps_h12_isolated() -> None:
+    admission = next(
+        item for item in load_migrations() if item.version == "020"
+    ).sql
+    permits = next(
+        item for item in load_migrations() if item.version == "021"
+    ).sql
+
+    assert "admission_contract_version IN ('2.2', '3.0')" in admission
+    assert "p_admission_contract_version NOT IN ('2.2', '3.0')" in admission
+    assert "CREATE OR REPLACE FUNCTION deer_runtime.admit_runtime_run(" in admission
+    assert "CREATE OR REPLACE FUNCTION deer_runtime.select_next_runtime_run_candidate(" in admission
+    assert "CREATE OR REPLACE FUNCTION deer_runtime.load_runtime_execution_authority(" in admission
+    assert "CREATE OR REPLACE FUNCTION deer_runtime.claim_runtime_run(" in admission
+    assert "CREATE OR REPLACE FUNCTION deer_runtime.takeover_runtime_run(" in admission
+    assert "JAVA_CAPABILITY_STRUCTURED / 3.0" in admission
+    assert "no Driver, route, Provider, UI, or role is enabled" in admission
+
+    assert "admission_contract_version IN ('2.2', '3.0')" in permits
+    assert "CREATE OR REPLACE FUNCTION deer_runtime.issue_runtime_external_permit(" in permits
+    assert "CREATE OR REPLACE FUNCTION deer_runtime.consume_runtime_external_permit(" in permits
+    assert "v_admission.admission_contract_version" in permits
+    assert "v_intent.admission_contract_version NOT IN ('2.2', '3.0')" in permits
+    assert "operation and consume semantics are unchanged" in permits
+
+    combined = admission + permits
+    assert "admission_contract_version ~" not in combined
+    assert "admission_contract_version <> ''" not in combined
+    assert combined.count("GRANT CREATE ON SCHEMA deer_runtime") == 2
+    assert combined.count("REVOKE CREATE ON SCHEMA deer_runtime") == 2
+
+
+def test_runtime_thread_source_identity_separates_conversation_and_task_step() -> None:
+    migration = next(
+        item for item in load_migrations() if item.version == "022"
+    ).sql
+
+    assert "ADD COLUMN source_kind VARCHAR(16) NOT NULL DEFAULT 'CONVERSATION'" in migration
+    assert "ALTER COLUMN conversation_id DROP NOT NULL" in migration
+    assert "ck_runtime_thread_source_identity" in migration
+    assert "source_kind = 'CONVERSATION' AND conversation_id IS NOT NULL" in migration
+    assert "source_kind = 'TASK_STEP'" in migration
+    assert "p_runtime_thread_revision <> p_task_execution_generation" in migration
+    assert "runtime-run-accepted-v2" in migration
+    assert "runtime-run-accepted-v3" in migration
+    assert "p_runtime_type <> 'JAVA_CAPABILITY_STRUCTURED'" in migration
+    assert "v_thread.source_kind IS DISTINCT FROM p_source_kind" in migration
+    assert "runtime_thread.source_kind" in migration
+    assert "DROP FUNCTION deer_runtime.admit_runtime_run(" in migration
+    assert "DROP FUNCTION deer_runtime.load_runtime_execution_authority(" in migration
+    assert "TO dianlian_supervisor_run_admitter" in migration
+    assert "TO dianlian_supervisor_executor" in migration
+    assert "no structured Driver, Provider, UI, or production route is enabled" in migration
+
+
+def test_structured_checkpoint_primitives_reuse_ledger_without_weakening_h12() -> None:
+    migration = next(
+        item for item in load_migrations() if item.version == "023"
+    ).sql
+
+    assert "CREATE FUNCTION deer_runtime.load_runtime_structured_checkpoint" in migration
+    assert "CREATE FUNCTION deer_runtime.save_runtime_structured_checkpoint" in migration
+    assert "structured-model-driver-state-v1" in migration
+    assert "admission_contract_version = '3.0'" in migration
+    assert "MODEL_RECEIPT_APPENDED" in migration
+    assert "runtime_h12_checkpoint" in migration
+    assert migration.count("FOR UPDATE") == 1
+    assert (
+        "checkpoint.checkpoint_id = p_expected_checkpoint_id\n         FOR UPDATE"
+        not in migration
+    )
+    assert "CREATE OR REPLACE FUNCTION deer_runtime.save_runtime_h12_checkpoint" not in migration
+    assert "TO dianlian_supervisor_executor" in migration
+    assert "no Driver, Provider, UI, or production composition is enabled" in migration
 
 
 def test_existing_supervisor_ledger_skips_bootstrap_sql(monkeypatch) -> None:
@@ -217,6 +386,52 @@ def test_s0_terminal_primitives_keep_cancel_and_terminal_mappings_explicit() -> 
     assert "transition_runtime_run" not in migration
 
 
+def test_cancel_controller_boundary_removes_worker_cancel_authority() -> None:
+    migration = load_migrations()[15].sql
+
+    assert "dianlian_supervisor_controller must be a sealed" in migration
+    assert "REVOKE ALL PRIVILEGES ON ALL TABLES" in migration
+    assert "REVOKE ALL PRIVILEGES (%I) ON TABLE" in migration
+    assert "REVOKE ALL PRIVILEGES ON ALL SEQUENCES" in migration
+    assert "REVOKE ALL PRIVILEGES ON ALL FUNCTIONS" in migration
+    assert "FROM PUBLIC, dianlian_supervisor_executor" in migration
+    assert "TO dianlian_supervisor_controller" in migration
+    assert "request_runtime_run_cancel" in migration
+
+
+def test_h12_postgres_checkpoint_is_append_only_current_fenced_and_cas_saved() -> None:
+    migration = load_migrations()[16].sql
+
+    assert "CREATE TABLE deer_runtime.runtime_h12_checkpoint" in migration
+    assert "CREATE FUNCTION deer_runtime.load_runtime_h12_checkpoint" in migration
+    assert "CREATE FUNCTION deer_runtime.save_runtime_h12_checkpoint" in migration
+    assert "BEFORE UPDATE OR DELETE" in migration
+    assert "BEFORE TRUNCATE" in migration
+    assert "v_new_state_version := p_expected_state_version + 1" in migration
+    assert "v_run.current_checkpoint_id IS DISTINCT FROM p_expected_checkpoint_id" in migration
+    assert "runtime_run.lease_until > CLOCK_TIMESTAMP()" in migration
+    assert "v_run.lease_until <= v_now" in migration
+    assert "CHECKPOINT_SAVED" in migration
+    assert "governed-h12-state-v1" in migration
+    assert "OCTET_LENGTH(state_json::TEXT) <= 1048576" in migration
+    assert "GRANT SELECT, INSERT ON TABLE deer_runtime.runtime_h12_checkpoint" in migration
+    assert migration.count("TO dianlian_supervisor_executor") == 2
+
+
+def test_candidate_replacements_run_as_the_sealed_routine_owner() -> None:
+    for migration in load_migrations()[13:15]:
+        replacement = migration.sql.index(
+            "CREATE OR REPLACE FUNCTION deer_runtime.select_next_runtime_run_candidate"
+        )
+        set_role = migration.sql.index(
+            "SET LOCAL ROLE dianlian_supervisor_routine_owner"
+        )
+        reset_role = migration.sql.index("RESET ROLE")
+        assert set_role < replacement < reset_role
+        assert "GRANT CREATE ON SCHEMA deer_runtime" in migration.sql
+        assert "REVOKE CREATE ON SCHEMA deer_runtime" in migration.sql
+
+
 def test_s0_admission_primitive_is_atomic_exact_and_deliberately_narrow() -> None:
     migration = load_migrations()[5].sql
 
@@ -391,6 +606,48 @@ def test_s0_candidate_discovery_is_read_only_compatible_and_fifo() -> None:
         "OWNER TO dianlian_supervisor_routine_owner"
     )
     assert "Activation: no service, application lifecycle, RunStore, or worker" in migration
+
+
+def test_expired_running_candidate_reuses_read_only_takeover_path() -> None:
+    migration = load_migrations()[13].sql
+
+    assert "CREATE INDEX idx_runtime_run_expired_running_candidate" in migration
+    assert "WHERE status = 'RUNNING'" in migration
+    assert (
+        "CREATE OR REPLACE FUNCTION deer_runtime.select_next_runtime_run_candidate"
+        in migration
+    )
+    assert "runtime_run.status = 'QUEUED'" in migration
+    assert "runtime_run.status = 'RUNNING'" in migration
+    assert "runtime_run.lease_until <= STATEMENT_TIMESTAMP()" in migration
+    assert (
+        "ORDER BY CASE WHEN runtime_run.status = 'RUNNING' THEN 0 ELSE 1 END"
+        in migration
+    )
+    assert "STABLE" in migration
+    assert "FOR UPDATE" not in migration
+    for mutating_keyword in ("INSERT INTO", "UPDATE deer_runtime", "DELETE FROM"):
+        assert mutating_keyword not in migration
+
+
+def test_expired_cancellation_candidate_reuses_read_only_takeover_path() -> None:
+    migration = load_migrations()[14].sql
+
+    assert "CREATE INDEX idx_runtime_run_expired_cancellation_candidate" in migration
+    assert "WHERE status IN ('CANCEL_REQUESTED', 'CANCELLING')" in migration
+    assert (
+        "CREATE OR REPLACE FUNCTION deer_runtime.select_next_runtime_run_candidate"
+        in migration
+    )
+    assert "runtime_run.status = 'QUEUED'" in migration
+    assert "'RUNNING', 'CANCEL_REQUESTED', 'CANCELLING'" in migration
+    assert "runtime_run.lease_until <= STATEMENT_TIMESTAMP()" in migration
+    assert "WHEN runtime_run.status IN (" in migration
+    assert "'CANCEL_REQUESTED', 'CANCELLING'" in migration
+    assert "STABLE" in migration
+    assert "FOR UPDATE" not in migration
+    for mutating_keyword in ("INSERT INTO", "UPDATE deer_runtime", "DELETE FROM"):
+        assert mutating_keyword not in migration
 
 
 def test_s0_execution_authority_separates_running_from_cancellation() -> None:
@@ -822,6 +1079,23 @@ def test_s0_external_permit_authorizer_can_execute_only_the_current_wrapper() ->
 
 def test_s0_external_operation_outcome_barrier_is_dormant_and_one_shot() -> None:
     migration = load_migrations()[12].sql
+
+    legacy_precondition = migration.split(
+        "DO $legacy_consumed_precondition$", maxsplit=1
+    )[1].split("$legacy_consumed_precondition$;", maxsplit=1)[0]
+    assert migration.index(
+        "LOCK TABLE deer_runtime.runtime_external_permit_attempt\n"
+        "    IN SHARE ROW EXCLUSIVE MODE"
+    ) < migration.index("DO $legacy_consumed_precondition$")
+    assert "operation_kind IN ('MODEL_INVOKE', 'TOOL_INVOKE')" in legacy_precondition
+    assert "permit_attempt.status = 'CONSUMED'" in legacy_precondition
+    assert "USING ERRCODE = '55000'" in legacy_precondition
+    assert (
+        "FROM PUBLIC, dianlian_supervisor_executor, "
+        "dianlian_supervisor_permit_authorizer, "
+        "dianlian_supervisor_dispatch_authorizer, "
+        "dianlian_supervisor_outcome_reconciler"
+    ) in migration
 
     assert "CREATE TABLE deer_runtime.runtime_external_operation_attempt" in migration
     assert "CREATE TABLE deer_runtime.runtime_external_operation_event" in migration

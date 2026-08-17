@@ -8,12 +8,14 @@ from uuid import UUID
 from dianlian_runtime.supervisor.contracts import (
     FrozenJsonObject,
     RuntimeExecutionAuthorityFact,
+    require_supported_admission_contract_version,
 )
 
 
 class DriverExecutionDisposition(StrEnum):
     COMPLETED = "COMPLETED"
     FAILED_CONFIRMED = "FAILED_CONFIRMED"
+    CONVERGENCE_PENDING = "CONVERGENCE_PENDING"
     FENCED = "FENCED"
 
 
@@ -46,8 +48,9 @@ class DriverFence:
         )
         _require_text("lease_owner", self.lease_owner, maximum=160)
         _require_positive("lease_epoch", self.lease_epoch)
-        if self.admission_contract_version != "2.2":
-            raise ValueError("admission_contract_version must be 2.2")
+        require_supported_admission_contract_version(
+            self.admission_contract_version
+        )
         _require_uuid("admission_snapshot_id", self.admission_snapshot_id)
         _require_hash("admission_snapshot_hash", self.admission_snapshot_hash)
 
@@ -126,7 +129,7 @@ class DriverExecutionResult:
             _require_code("terminal_reason", self.terminal_reason)
             _require_code("failure_code", self.failure_code)
         elif self.terminal_reason is not None or self.failure_code is not None:
-            raise ValueError("fenced execution cannot include terminal facts")
+            raise ValueError("nonterminal execution cannot include terminal facts")
 
 
 @dataclass(frozen=True, slots=True)

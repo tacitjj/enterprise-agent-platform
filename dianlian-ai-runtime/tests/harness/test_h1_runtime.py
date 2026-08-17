@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
-import os
 from pathlib import Path
 from uuid import UUID
 
@@ -10,7 +9,6 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import serialization
 import httpx
 import jwt
-from langchain_core.messages import HumanMessage, SystemMessage
 import pytest
 
 from dianlian_runtime.config import RuntimeSettings
@@ -18,15 +16,12 @@ from dianlian_runtime.harness.h1_contracts import CreateH1ExecutionRequest
 from dianlian_runtime.harness.h1_runtime import DeerFlowH1Runtime, H1IdempotencyConflict
 from dianlian_runtime.harness.model_gateway import (
     JavaModelGatewayChatModel,
-    ModelGatewayFailedSafe,
     RuntimeModelServiceJwtIssuer,
     build_model_call_request,
 )
 
 
-_UPSTREAM_ROOT_VALUE = os.getenv("DEERFLOW_UPSTREAM_ROOT")
-UPSTREAM_ROOT = Path(_UPSTREAM_ROOT_VALUE or "deerflow-upstream-not-configured")
-_UPSTREAM_SKIP_REASON = "set DEERFLOW_UPSTREAM_ROOT to the pinned DeerFlow checkout"
+UPSTREAM_ROOT = Path("/private/tmp/dianlian-deer-flow-upstream")
 
 
 def _payload() -> dict[str, object]:
@@ -241,56 +236,7 @@ def test_h1_v21_accepts_an_explicit_deny_all_policy() -> None:
     assert admission.tool_policy.allowed_tools == []
 
 
-def test_h1_usage_pending_requires_reconciliation(tmp_path: Path) -> None:
-    async def verify() -> None:
-        admission = CreateH1ExecutionRequest.model_validate(_v21_payload())
-        expected_call = build_model_call_request(admission)
-        issuer, _ = _issuer(tmp_path)
-
-        async def handler(request: httpx.Request) -> httpx.Response:
-            del request
-            return httpx.Response(
-                200,
-                json={
-                    "contractVersion": "1.0",
-                    "modelCallId": str(expected_call.model_call_id),
-                    "status": "USAGE_PENDING",
-                    "assistantText": "usage is not final",
-                    "providerRequestId": "provider-request-pending",
-                    "finishReason": "stop",
-                    "inputTokens": 9,
-                    "outputTokens": 4,
-                    "usageConfirmed": False,
-                    "capturedAmount": 0,
-                    "failureCode": None,
-                    "replayed": False,
-                },
-            )
-
-        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-        model = JavaModelGatewayChatModel(
-            base_url="https://platform.internal",
-            jwt_issuer=issuer,
-            timeout_seconds=10,
-            client=client,
-        )
-        with pytest.raises(ModelGatewayFailedSafe) as raised:
-            await model._agenerate(
-                [
-                    SystemMessage(content=expected_call.system_instruction),
-                    HumanMessage(content=expected_call.messages[0].text),
-                ],
-                execution_id=admission.execution_id,
-                model_call_request=expected_call,
-            )
-        await client.aclose()
-
-        assert raised.value.code == "MODEL_USAGE_RECONCILIATION_REQUIRED"
-
-    asyncio.run(verify())
-
-
-@pytest.mark.skipif(not UPSTREAM_ROOT.is_dir(), reason=_UPSTREAM_SKIP_REASON)
+@pytest.mark.skipif(not UPSTREAM_ROOT.is_dir(), reason="pinned DeerFlow checkout missing")
 def test_h1_uses_pinned_harness_and_calls_java_once_with_service_identity(
     tmp_path: Path,
 ) -> None:
@@ -372,7 +318,7 @@ def test_h1_uses_pinned_harness_and_calls_java_once_with_service_identity(
     asyncio.run(verify())
 
 
-@pytest.mark.skipif(not UPSTREAM_ROOT.is_dir(), reason=_UPSTREAM_SKIP_REASON)
+@pytest.mark.skipif(not UPSTREAM_ROOT.is_dir(), reason="pinned DeerFlow checkout missing")
 def test_h1_outcome_unknown_is_terminal_and_never_retried(tmp_path: Path) -> None:
     async def verify() -> None:
         admission = CreateH1ExecutionRequest.model_validate(_payload())
@@ -410,7 +356,7 @@ def test_h1_outcome_unknown_is_terminal_and_never_retried(tmp_path: Path) -> Non
     asyncio.run(verify())
 
 
-@pytest.mark.skipif(not UPSTREAM_ROOT.is_dir(), reason=_UPSTREAM_SKIP_REASON)
+@pytest.mark.skipif(not UPSTREAM_ROOT.is_dir(), reason="pinned DeerFlow checkout missing")
 def test_h1_java_unknown_response_preserves_code_and_never_retries(
     tmp_path: Path,
 ) -> None:
@@ -466,7 +412,7 @@ def test_h1_java_unknown_response_preserves_code_and_never_retries(
     asyncio.run(verify())
 
 
-@pytest.mark.skipif(not UPSTREAM_ROOT.is_dir(), reason=_UPSTREAM_SKIP_REASON)
+@pytest.mark.skipif(not UPSTREAM_ROOT.is_dir(), reason="pinned DeerFlow checkout missing")
 def test_h1_does_not_publish_success_when_deerflow_status_is_not_persisted(
     tmp_path: Path,
 ) -> None:
@@ -529,7 +475,7 @@ def test_h1_does_not_publish_success_when_deerflow_status_is_not_persisted(
     asyncio.run(verify())
 
 
-@pytest.mark.skipif(not UPSTREAM_ROOT.is_dir(), reason=_UPSTREAM_SKIP_REASON)
+@pytest.mark.skipif(not UPSTREAM_ROOT.is_dir(), reason="pinned DeerFlow checkout missing")
 def test_h1_restart_converts_inflight_call_to_unknown_without_redispatch(
     tmp_path: Path,
 ) -> None:

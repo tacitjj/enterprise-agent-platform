@@ -35,6 +35,8 @@ from dianlian_runtime.supervisor.contracts import (
     FrozenJsonArray,
     FrozenJsonObject,
     IssueRuntimeExternalPermitRequest,
+    LoadRuntimeH12CheckpointRequest,
+    LoadRuntimeStructuredCheckpointRequest,
     LoadRuntimeExternalOperationBarrierRequest,
     LoadRuntimeExecutionAuthorityRequest,
     MultitaskStrategy,
@@ -52,10 +54,15 @@ from dianlian_runtime.supervisor.contracts import (
     RuntimeExternalOperationAttemptFact,
     RuntimeExternalOperationBarrierFact,
     RuntimeExternalPermitFact,
+    RuntimeH12CheckpointFact,
+    RuntimeStructuredCheckpointFact,
     RuntimeRunCandidateFact,
     RuntimeRunEventFact,
     RuntimeRunFact,
     RuntimeStatus,
+    RuntimeSourceKind,
+    SaveRuntimeH12CheckpointRequest,
+    SaveRuntimeStructuredCheckpointRequest,
     SupervisorCommandConflict,
     SupervisorIntegrityOrContractViolation,
     SupervisorInvalidCommand,
@@ -96,6 +103,22 @@ SOURCE_FACT_ID = UUID("00000000-0000-0000-0000-000000000022")
 RECONCILE_EVENT_ID = UUID("00000000-0000-0000-0000-000000000023")
 HASH = "a" * 64
 PAYLOAD = FrozenJsonObject({"z": [2, {"a": 1}]})
+H12_CHECKPOINT_ID = "h12-checkpoint-1"
+
+
+def _h12_state(*, state_version: int = 1) -> FrozenJsonObject:
+    return FrozenJsonObject(
+        {
+            "schemaVersion": "governed-h12-state-v1",
+            "stateVersion": state_version,
+            "tenantId": str(TENANT_ID),
+            "runtimeRunId": str(RUN_ID),
+            "taskExecutionGeneration": 1,
+            "initialModel": None,
+            "tool": None,
+            "afterToolModel": None,
+        }
+    )
 
 
 def _candidate_row() -> dict[str, object]:
@@ -180,6 +203,7 @@ def _execution_authority_row() -> dict[str, object]:
         "agent_instance_id": AGENT_INSTANCE_ID,
         "user_id": USER_ID,
         "conversation_id": CONVERSATION_ID,
+        "source_kind": "CONVERSATION",
         "source_message_id": SOURCE_MESSAGE_ID,
         "runtime_thread_revision": 1,
         "runtime_type": "DEERFLOW",
@@ -239,7 +263,11 @@ def _execution_authority_fact() -> RuntimeExecutionAuthorityFact:
     )
 
 
-def _external_permit_row(*, consumed: bool = False) -> dict[str, object]:
+def _external_permit_row(
+    *,
+    consumed: bool = False,
+    admission_contract_version: str = "2.2",
+) -> dict[str, object]:
     return {
         "tenant_id": TENANT_ID,
         "runtime_external_permit_id": EXTERNAL_PERMIT_ID,
@@ -247,7 +275,7 @@ def _external_permit_row(*, consumed: bool = False) -> dict[str, object]:
         "runtime_thread_id": THREAD_ID,
         "task_step_id": STEP_ID,
         "task_execution_generation": 1,
-        "admission_contract_version": "2.2",
+        "admission_contract_version": admission_contract_version,
         "admission_snapshot_id": ADMISSION_SNAPSHOT_ID,
         "admission_snapshot_hash": HASH,
         "operation_kind": "ADMISSION_RESOLVE" if consumed else "MODEL_INVOKE",
@@ -489,6 +517,99 @@ def _barrier_row(*, blocking: bool = True) -> dict[str, object]:
     }
 
 
+def _load_h12_checkpoint_request() -> LoadRuntimeH12CheckpointRequest:
+    return LoadRuntimeH12CheckpointRequest(
+        tenant_id=TENANT_ID,
+        runtime_run_id=RUN_ID,
+        task_execution_generation=1,
+        lease_owner="worker-1",
+        lease_epoch=1,
+    )
+
+
+def _save_h12_checkpoint_request() -> SaveRuntimeH12CheckpointRequest:
+    return SaveRuntimeH12CheckpointRequest(
+        tenant_id=TENANT_ID,
+        runtime_run_id=RUN_ID,
+        task_execution_generation=1,
+        lease_owner="worker-1",
+        lease_epoch=1,
+        expected_checkpoint_id=None,
+        expected_state_version=0,
+        event_id=EVENT_ID,
+        checkpoint_id=H12_CHECKPOINT_ID,
+        transition_code="INITIAL_PREPARED",
+        state=_h12_state(),
+    )
+
+
+def _h12_checkpoint_row() -> dict[str, object]:
+    return {
+        "tenant_id": TENANT_ID,
+        "runtime_run_id": RUN_ID,
+        "task_execution_generation": 1,
+        "checkpoint_id": H12_CHECKPOINT_ID,
+        "previous_checkpoint_id": None,
+        "state_version": 1,
+        "state_json": _h12_state().to_builtin(),
+        "state_hash": HASH,
+        "transition_code": "INITIAL_PREPARED",
+        "event_id": EVENT_ID,
+        "created_by": "worker-1",
+        "lease_epoch": 1,
+        "created_at": NOW,
+    }
+
+
+def _structured_state(*, state_version: int = 1) -> FrozenJsonObject:
+    return FrozenJsonObject(
+        {
+            "schemaVersion": "structured-model-driver-state-v1",
+            "stateVersion": state_version,
+            "tenantId": str(TENANT_ID),
+            "runtimeRunId": str(RUN_ID),
+            "taskExecutionGeneration": 1,
+            "admissionManifest": {},
+            "receipts": [],
+        }
+    )
+
+
+def _load_structured_checkpoint_request() -> LoadRuntimeStructuredCheckpointRequest:
+    return LoadRuntimeStructuredCheckpointRequest(
+        TENANT_ID,
+        RUN_ID,
+        1,
+        "worker-1",
+        1,
+    )
+
+
+def _save_structured_checkpoint_request() -> SaveRuntimeStructuredCheckpointRequest:
+    return SaveRuntimeStructuredCheckpointRequest(
+        TENANT_ID,
+        RUN_ID,
+        1,
+        "worker-1",
+        1,
+        None,
+        0,
+        EVENT_ID,
+        "structured-checkpoint-1",
+        "MANIFEST_RESOLVED",
+        _structured_state(),
+    )
+
+
+def _structured_checkpoint_row() -> dict[str, object]:
+    return {
+        **_h12_checkpoint_row(),
+        "checkpoint_id": "structured-checkpoint-1",
+        "state_json": _structured_state().to_builtin(),
+        "transition_code": "MANIFEST_RESOLVED",
+    }
+
+
 def _event_row() -> dict[str, object]:
     return {
         "tenant_id": TENANT_ID,
@@ -681,7 +802,7 @@ def _requests() -> list[tuple[str, object, str, int, dict[str, object]]]:
                 accepted_event_payload=PAYLOAD,
             ),
             "admit_runtime_run",
-            31,
+            32,
             _run_row(),
         ),
         (
@@ -753,6 +874,34 @@ def _requests() -> list[tuple[str, object, str, int, dict[str, object]]]:
             "consume_and_authorize_runtime_external_permit",
             13,
             _external_permit_row(consumed=True),
+        ),
+        (
+            "load_h12_checkpoint",
+            _load_h12_checkpoint_request(),
+            "load_runtime_h12_checkpoint",
+            5,
+            _h12_checkpoint_row(),
+        ),
+        (
+            "save_h12_checkpoint",
+            _save_h12_checkpoint_request(),
+            "save_runtime_h12_checkpoint",
+            11,
+            _h12_checkpoint_row(),
+        ),
+        (
+            "load_structured_checkpoint",
+            _load_structured_checkpoint_request(),
+            "load_runtime_structured_checkpoint",
+            5,
+            _structured_checkpoint_row(),
+        ),
+        (
+            "save_structured_checkpoint",
+            _save_structured_checkpoint_request(),
+            "save_runtime_structured_checkpoint",
+            11,
+            _structured_checkpoint_row(),
         ),
         (
             "append_event",
@@ -895,7 +1044,7 @@ def test_admit_binds_snapshot_receipt_after_runtime_compatibility() -> None:
     repository.admit(command)
 
     assert connection.parameters is not None
-    assert connection.parameters[24:30] == (  # type: ignore[index]
+    assert connection.parameters[25:31] == (  # type: ignore[index]
         command.runtime_version,
         command.agent_name,
         command.admission_contract_version,
@@ -933,8 +1082,8 @@ def test_execution_authority_maps_only_immutable_scalar_references_and_fence() -
     assert projection == (
         "SELECT tenant_id, runtime_run_id, runtime_thread_id, task_run_id, "
         "task_step_id, task_execution_generation, agent_instance_id, user_id, "
-        "conversation_id, source_message_id, runtime_thread_revision, runtime_type, "
-        "runtime_agent_name, capability_version_id, prompt_version_id, "
+        "conversation_id, source_kind, source_message_id, runtime_thread_revision, "
+        "runtime_type, runtime_agent_name, capability_version_id, prompt_version_id, "
         "model_policy_id, budget_reservation_id, operation_kind, multitask_strategy, "
         "request_hash, idempotency_key, predecessor_runtime_run_id, "
         "expected_checkpoint_id, runtime_version, agent_name, lease_owner, lease_epoch, "
@@ -1001,6 +1150,17 @@ def test_external_permit_primitives_bind_frozen_signatures_and_explicit_projecti
     ):
         projection = " ".join(connection.statement.split()).split(" FROM ", 1)[0]
         assert projection == expected_projection
+
+
+def test_external_permit_projection_accepts_structured_admission_version() -> None:
+    repository, _ = _repository(
+        [_external_permit_row(admission_contract_version="3.0")]
+    )
+
+    result = repository.issue_external_permit(_issue_external_permit_request())
+
+    assert result.fact is not None
+    assert result.fact.admission_contract_version == "3.0"
 
 
 def test_current_external_permit_wrapper_zero_rows_commit_as_not_applied() -> None:
@@ -1198,6 +1358,74 @@ def test_external_operation_primitives_bind_frozen_signatures_and_explicit_proje
         barrier_connection,
     ):
         assert connection.trace == ["begin", "commit", "close"]
+
+
+def test_h12_checkpoint_primitives_bind_state_identity_and_explicit_projection() -> None:
+    load_repository, load_connection = _repository([_h12_checkpoint_row()])
+    save_repository, save_connection = _repository([_h12_checkpoint_row()])
+
+    loaded = load_repository.load_h12_checkpoint(_load_h12_checkpoint_request())
+    saved = save_repository.save_h12_checkpoint(_save_h12_checkpoint_request())
+
+    expected = RuntimeH12CheckpointFact(
+        tenant_id=TENANT_ID,
+        runtime_run_id=RUN_ID,
+        task_execution_generation=1,
+        checkpoint_id=H12_CHECKPOINT_ID,
+        previous_checkpoint_id=None,
+        state_version=1,
+        state=_h12_state(),
+        state_hash=HASH,
+        transition_code="INITIAL_PREPARED",
+        event_id=EVENT_ID,
+        created_by="worker-1",
+        lease_epoch=1,
+        created_at=NOW.astimezone(timezone.utc),
+    )
+    assert loaded.fact == expected
+    assert saved.fact == expected
+    assert load_connection.parameters == (TENANT_ID, RUN_ID, 1, "worker-1", 1)
+    assert save_connection.parameters is not None
+    assert save_connection.parameters[:10] == (  # type: ignore[index]
+        TENANT_ID,
+        RUN_ID,
+        1,
+        "worker-1",
+        1,
+        None,
+        0,
+        EVENT_ID,
+        H12_CHECKPOINT_ID,
+        "INITIAL_PREPARED",
+    )
+    assert save_connection.parameters[10].obj == _h12_state().to_builtin()  # type: ignore[index,union-attr]
+    expected_projection = (
+        "SELECT tenant_id, runtime_run_id, task_execution_generation, checkpoint_id, "
+        "previous_checkpoint_id, state_version, state_json, state_hash, transition_code, "
+        "event_id, created_by, lease_epoch, created_at"
+    )
+    for connection in (load_connection, save_connection):
+        projection = " ".join(connection.statement.split()).split(" FROM ", 1)[0]
+        assert projection == expected_projection
+
+
+def test_h12_checkpoint_request_rejects_identity_drift_before_database_access() -> None:
+    request = _save_h12_checkpoint_request()
+
+    with pytest.raises(ValueError, match="exact governed H12"):
+        replace(
+            request,
+            state=FrozenJsonObject(
+                {
+                    **_h12_state().to_builtin(),
+                    "unexpected": True,
+                }
+            ),
+        )
+    with pytest.raises(ValueError, match="stateVersion"):
+        replace(request, state=_h12_state(state_version=2))
+    with pytest.raises(ValueError, match="must be null"):
+        replace(request, expected_checkpoint_id="old-checkpoint")
 
 
 def test_arm_replay_is_strongly_typed_do_not_dispatch_even_after_outcome() -> None:
@@ -2036,7 +2264,11 @@ def test_repository_source_cannot_read_or_mutate_supervisor_tables_directly() ->
     for verb in ("INSERT ", "UPDATE ", "DELETE ", "TRUNCATE "):
         assert verb not in upper
     called_primitives = set(
-        re.findall(r"\bFROM\s+deer_runtime\.([a-z_]+)\s*\(", source, re.IGNORECASE)
+        re.findall(
+            r"\bFROM\s+deer_runtime\.([a-z0-9_]+)\s*\(",
+            source,
+            re.IGNORECASE,
+        )
     )
     assert called_primitives == {
         "admit_runtime_run",
@@ -2052,6 +2284,10 @@ def test_repository_source_cannot_read_or_mutate_supervisor_tables_directly() ->
         "record_runtime_external_operation_outcome",
         "reconcile_runtime_external_operation_outcome",
         "load_runtime_external_operation_barrier",
+        "load_runtime_h12_checkpoint",
+        "save_runtime_h12_checkpoint",
+        "load_runtime_structured_checkpoint",
+        "save_runtime_structured_checkpoint",
         "append_runtime_run_event",
         "record_runtime_checkpoint_ref",
         "request_runtime_run_cancel",
@@ -2066,7 +2302,8 @@ def test_repository_source_cannot_read_or_mutate_supervisor_tables_directly() ->
         r"(?:schema_migration|runtime_thread|runtime_run|runtime_run_event|"
         r"runtime_run_control|runtime_checkpoint_ref|runtime_external_intent|"
         r"runtime_external_permit_attempt|runtime_external_permit_event|"
-        r"runtime_external_operation_attempt|runtime_external_operation_event)"
+        r"runtime_external_operation_attempt|runtime_external_operation_event|"
+        r"runtime_h12_checkpoint)"
         r"\b(?!\s*\()",
         re.IGNORECASE,
     )
@@ -2079,11 +2316,17 @@ def test_frozen_json_rejects_non_string_keys_recursively() -> None:
 
 
 def test_candidate_request_rejects_blank_or_oversized_compatibility_keys() -> None:
+    assert (
+        SelectNextRuntimeRunCandidateRequest(
+            "runtime-v1", "structured-agent-v1", "3.0"
+        ).admission_contract_version
+        == "3.0"
+    )
     with pytest.raises(ValueError):
         SelectNextRuntimeRunCandidateRequest("", "agent-v1", "2.2")
     with pytest.raises(ValueError):
         SelectNextRuntimeRunCandidateRequest("runtime-v1", "a" * 129, "2.2")
-    with pytest.raises(ValueError, match="must be 2.2"):
+    with pytest.raises(ValueError, match="must be one of 2.2, 3.0"):
         SelectNextRuntimeRunCandidateRequest("runtime-v1", "agent-v1", "2.1")
 
 
@@ -2091,7 +2334,16 @@ def test_admission_request_rejects_unbound_or_unsupported_snapshot_receipts() ->
     admission = _requests()[1][1]
     assert isinstance(admission, AdmitRuntimeRunRequest)
 
-    with pytest.raises(ValueError, match="must be 2.2"):
+    structured = replace(
+        admission,
+        admission_contract_version="3.0",
+        source_kind=RuntimeSourceKind.TASK_STEP,
+        conversation_id=None,
+        source_message_id=None,
+        runtime_thread_revision=admission.task_execution_generation,
+    )
+    assert structured.admission_contract_version == "3.0"
+    with pytest.raises(ValueError, match="must be one of 2.2, 3.0"):
         replace(admission, admission_contract_version="2.1")
     with pytest.raises(ValueError, match="nil UUID"):
         replace(admission, admission_snapshot_id=UUID(int=0))

@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, timedelta
 import json
-import os
 from pathlib import Path
 import sqlite3
 from uuid import UUID
@@ -21,9 +20,7 @@ from dianlian_runtime.harness.h12_gateway import JavaH12GatewayClient
 from dianlian_runtime.harness.model_gateway import IssuedRuntimeModelJwt
 
 
-_UPSTREAM_ROOT_VALUE = os.getenv("DEERFLOW_UPSTREAM_ROOT")
-UPSTREAM_ROOT = Path(_UPSTREAM_ROOT_VALUE or "deerflow-upstream-not-configured")
-_UPSTREAM_SKIP_REASON = "set DEERFLOW_UPSTREAM_ROOT to the pinned DeerFlow checkout"
+UPSTREAM_ROOT = Path("/private/tmp/dianlian-deer-flow-upstream")
 EXECUTION_ID = UUID("22000000-0000-4000-8000-000000000001")
 SELECTION_ID = UUID("22000000-0000-4000-8000-000000000002")
 POLICY_HASH_100000 = "6cf57e7fa121d4edaeb1c379df87fb5ae08e693d40c1639d3fad8ae964c9b66c"
@@ -188,7 +185,7 @@ def _gateway(handler) -> tuple[JavaH12GatewayClient, httpx.AsyncClient, _Recordi
     )
 
 
-@pytest.mark.skipif(not UPSTREAM_ROOT.is_dir(), reason=_UPSTREAM_SKIP_REASON)
+@pytest.mark.skipif(not UPSTREAM_ROOT.is_dir(), reason="pinned DeerFlow checkout missing")
 def test_h12_model_one_final_is_durable_idempotent_and_event_replayable(
     tmp_path: Path,
 ) -> None:
@@ -227,7 +224,7 @@ def test_h12_model_one_final_is_durable_idempotent_and_event_replayable(
     asyncio.run(verify())
 
 
-@pytest.mark.skipif(not UPSTREAM_ROOT.is_dir(), reason=_UPSTREAM_SKIP_REASON)
+@pytest.mark.skipif(not UPSTREAM_ROOT.is_dir(), reason="pinned DeerFlow checkout missing")
 def test_h12_model_selection_runs_exactly_one_tool_then_model_two(tmp_path: Path) -> None:
     async def verify() -> None:
         bodies: list[dict[str, object]] = []
@@ -287,7 +284,7 @@ def test_h12_model_selection_runs_exactly_one_tool_then_model_two(tmp_path: Path
         ("OUTCOME_UNKNOWN", None, "MODEL_PROVIDER_OUTCOME_UNKNOWN", False, "MODEL_PROVIDER_OUTCOME_UNKNOWN"),
     ],
 )
-@pytest.mark.skipif(not UPSTREAM_ROOT.is_dir(), reason=_UPSTREAM_SKIP_REASON)
+@pytest.mark.skipif(not UPSTREAM_ROOT.is_dir(), reason="pinned DeerFlow checkout missing")
 def test_h12_non_continuable_model_status_never_dispatches_downstream(
     tmp_path: Path,
     status: str,
@@ -335,7 +332,7 @@ def test_h12_non_continuable_model_status_never_dispatches_downstream(
     asyncio.run(verify())
 
 
-@pytest.mark.skipif(not UPSTREAM_ROOT.is_dir(), reason=_UPSTREAM_SKIP_REASON)
+@pytest.mark.skipif(not UPSTREAM_ROOT.is_dir(), reason="pinned DeerFlow checkout missing")
 def test_h12_model_in_flight_is_unknown_and_never_creates_a_downstream_slot(
     tmp_path: Path,
 ) -> None:
@@ -375,7 +372,7 @@ def test_h12_model_in_flight_is_unknown_and_never_creates_a_downstream_slot(
     asyncio.run(verify())
 
 
-@pytest.mark.skipif(not UPSTREAM_ROOT.is_dir(), reason=_UPSTREAM_SKIP_REASON)
+@pytest.mark.skipif(not UPSTREAM_ROOT.is_dir(), reason="pinned DeerFlow checkout missing")
 def test_h12_tool_in_flight_is_unknown_and_never_dispatches_model_two(
     tmp_path: Path,
 ) -> None:
@@ -431,7 +428,7 @@ def test_h12_tool_in_flight_is_unknown_and_never_dispatches_model_two(
     asyncio.run(verify())
 
 
-@pytest.mark.skipif(not UPSTREAM_ROOT.is_dir(), reason=_UPSTREAM_SKIP_REASON)
+@pytest.mark.skipif(not UPSTREAM_ROOT.is_dir(), reason="pinned DeerFlow checkout missing")
 def test_h12_restart_replays_only_the_exact_persisted_dispatching_intent(
     tmp_path: Path,
 ) -> None:
@@ -484,7 +481,7 @@ def test_h12_restart_replays_only_the_exact_persisted_dispatching_intent(
     asyncio.run(verify())
 
 
-@pytest.mark.skipif(not UPSTREAM_ROOT.is_dir(), reason=_UPSTREAM_SKIP_REASON)
+@pytest.mark.skipif(not UPSTREAM_ROOT.is_dir(), reason="pinned DeerFlow checkout missing")
 def test_h12_restart_reconciles_only_unmapped_h1_run_before_recreating_execution(
     tmp_path: Path,
 ) -> None:

@@ -19,11 +19,17 @@ from dianlian_runtime.harness.model_gateway import (
 
 
 MODEL_INVOKE_SCOPE = "model.invoke"
+GOVERNED_MODEL_INVOKE_SCOPE = "model.invoke.governed"
+STRUCTURED_MODEL_INVOKE_SCOPE = "model.invoke.structured"
 TOOL_INVOKE_SCOPE = "tool.invoke"
+GOVERNED_TOOL_INVOKE_SCOPE = "tool.invoke.governed"
 ADMISSION_RESOLVE_SCOPE = "admission.resolve"
 RuntimeServiceScope = Literal[
     "model.invoke",
+    "model.invoke.governed",
+    "model.invoke.structured",
     "tool.invoke",
+    "tool.invoke.governed",
     "admission.resolve",
 ]
 
@@ -226,7 +232,10 @@ class H12RuntimeServiceJwtIssuer(RuntimeModelServiceJwtIssuer):
     ) -> IssuedRuntimeModelJwt:
         if scope not in {
             MODEL_INVOKE_SCOPE,
+            GOVERNED_MODEL_INVOKE_SCOPE,
+            STRUCTURED_MODEL_INVOKE_SCOPE,
             TOOL_INVOKE_SCOPE,
+            GOVERNED_TOOL_INVOKE_SCOPE,
             ADMISSION_RESOLVE_SCOPE,
         }:
             raise ValueError("runtime service JWT scope is invalid")
