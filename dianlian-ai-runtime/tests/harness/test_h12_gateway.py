@@ -426,6 +426,10 @@ def test_scoped_issuer_signs_one_exact_scope_per_token(tmp_path: Path) -> None:
             "admission.resolve",
             issuer.issue(scope="admission.resolve", now=issued_at),
         ),
+        (
+            "model.invoke.structured",
+            issuer.issue(scope="model.invoke.structured", now=issued_at),
+        ),
     ):
         claims = jwt.decode(
             token.value,

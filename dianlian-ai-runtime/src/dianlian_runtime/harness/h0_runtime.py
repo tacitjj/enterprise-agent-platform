@@ -38,10 +38,6 @@ class GuidanceOutcomeUnknown(RuntimeError):
     """DeerFlow invocation started, so applying the guidance is uncertain."""
 
 
-class H0IdempotencyConflict(RuntimeError):
-    """An H0 identity is already bound to a different request."""
-
-
 class _DummyState(TypedDict, total=False):
     prompt: str
     guidance: str
@@ -186,38 +182,32 @@ class DeerFlowH0Runtime:
             raise ValueError("prompt must not be blank")
 
         async with self._lock:
-            recovering_creation = False
             existing = await self._find_by_idempotency_key(request.idempotency_key)
             if existing is not None:
                 _validate_replay(existing, request)
-                if existing["status"] != "CREATING" or existing["deerflow_run_id"]:
-                    return _snapshot(existing)
-                recovering_creation = True
-            else:
-                existing = await self._find_by_execution_id(request.execution_id)
-                if existing is not None:
-                    raise H0IdempotencyConflict(
-                        "execution_id is already mapped to another request"
-                    )
+                return _snapshot(existing)
+            existing = await self._find_by_execution_id(request.execution_id)
+            if existing is not None:
+                raise RuntimeError("execution_id is already mapped to another request")
 
-                now = _now_iso()
-                await self._mapping_db.execute(
-                    """
-                    INSERT INTO execution_mapping (
-                        execution_id, idempotency_key, thread_id, request_hash, status,
-                        created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, 'CREATING', ?, ?)
-                    """,
-                    (
-                        request.execution_id,
-                        request.idempotency_key,
-                        request.thread_id,
-                        request.request_hash,
-                        now,
-                        now,
-                    ),
-                )
-                await self._mapping_db.commit()
+            now = _now_iso()
+            await self._mapping_db.execute(
+                """
+                INSERT INTO execution_mapping (
+                    execution_id, idempotency_key, thread_id, request_hash, status,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, 'CREATING', ?, ?)
+                """,
+                (
+                    request.execution_id,
+                    request.idempotency_key,
+                    request.thread_id,
+                    request.request_hash,
+                    now,
+                    now,
+                ),
+            )
+            await self._mapping_db.commit()
 
             run = await self._run_manager.create(
                 request.thread_id,
@@ -230,14 +220,6 @@ class DeerFlowH0Runtime:
                 deerflow_run_id=run.run_id,
                 status="RUNNING",
             )
-            if recovering_creation:
-                await self._put_event(
-                    request.thread_id,
-                    run.run_id,
-                    "dianlian.h0.creation.recovered",
-                    "recovery",
-                    {"executionId": request.execution_id},
-                )
             await self._put_event(
                 request.thread_id,
                 run.run_id,
@@ -501,9 +483,7 @@ def _validate_replay(row: aiosqlite.Row, request: StartExecutionRequest) -> None
         or row["thread_id"] != request.thread_id
         or row["request_hash"] != request.request_hash
     ):
-        raise H0IdempotencyConflict(
-            "idempotency_key is already mapped to another request"
-        )
+        raise RuntimeError("idempotency_key is already mapped to another request")
 
 
 def _validate_id(value: str, label: str) -> None:

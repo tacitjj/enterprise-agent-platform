@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
-from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 import pytest
@@ -18,7 +17,6 @@ from dianlian_runtime.harness.contracts import (
 from dianlian_runtime.harness.h0_runtime import (
     GuidanceOutcomeUnknown,
     GuidancePreconditionRejected,
-    H0IdempotencyConflict,
 )
 from tests.internal_auth_testkit import create_test_app
 
@@ -29,7 +27,6 @@ class _FakeH0Runtime:
         self.request: StartExecutionRequest | None = None
         self.snapshot: ExecutionSnapshot | None = None
         self.guidance_error: Exception | None = None
-        self.start_error: Exception | None = None
 
     async def __aenter__(self):
         self.ready = True
@@ -39,8 +36,6 @@ class _FakeH0Runtime:
         self.ready = False
 
     async def start_execution(self, request: StartExecutionRequest) -> ExecutionSnapshot:
-        if self.start_error is not None:
-            raise self.start_error
         self.request = request
         now = datetime(2026, 8, 12, tzinfo=UTC)
         self.snapshot = ExecutionSnapshot(
@@ -135,56 +130,6 @@ def test_h0_routes_are_not_registered_when_disabled(tmp_path: Path) -> None:
     response = client.post("/internal/v1/agent-runtime/executions", json={})
 
     assert response.status_code == 404
-
-
-@pytest.mark.parametrize(
-    ("runtime_error", "expected_status", "expected_code", "hidden_detail"),
-    [
-        (
-            H0IdempotencyConflict("internal binding detail"),
-            409,
-            "RUNTIME_IDEMPOTENCY_CONFLICT",
-            "internal binding detail",
-        ),
-        (
-            RuntimeError("database connection detail"),
-            503,
-            "RUNTIME_UNAVAILABLE",
-            "database connection detail",
-        ),
-    ],
-)
-def test_h0_create_distinguishes_conflicts_from_runtime_failures(
-    tmp_path: Path,
-    runtime_error: Exception,
-    expected_status: int,
-    expected_code: str,
-    hidden_detail: str,
-) -> None:
-    runtime = _FakeH0Runtime()
-    runtime.start_error = runtime_error
-    payload = {
-        "contractVersion": "1.0",
-        "executionId": "20000000-0000-4000-8000-000000000001",
-        "idempotencyKey": "runtime-h0-001",
-        "threadId": "10000000-0000-4000-8000-000000000001",
-        "executionGeneration": 1,
-        "tenantId": "30000000-0000-4000-8000-000000000001",
-        "actorUserId": "40000000-0000-4000-8000-000000000001",
-        "requestHash": "sha256:test-request",
-    }
-
-    with TestClient(
-        create_test_app(
-            _settings(tmp_path, enabled=True),
-            agent_harness_runtime=runtime,
-        )
-    ) as client:
-        response = client.post("/internal/v1/agent-runtime/executions", json=payload)
-
-    assert response.status_code == expected_status
-    assert response.json()["code"] == expected_code
-    assert hidden_detail not in response.json()["message"]
 
 
 @pytest.mark.parametrize(
@@ -294,117 +239,5 @@ def test_h0_runtime_only_marks_pre_dispatch_conflicts_as_safe() -> None:
                 guidance="补充约束",
             )
         assert dispatched._graph.invoked is True
-
-    asyncio.run(verify())
-
-
-class _RecoveringRunManager:
-    def __init__(self) -> None:
-        self.create_count = 0
-
-    async def create(self, *args, **kwargs):
-        del args, kwargs
-        self.create_count += 1
-        return SimpleNamespace(run_id="recovered-run-h0-1")
-
-    async def try_start(self, run_id: str) -> None:
-        assert run_id == "recovered-run-h0-1"
-
-
-class _RecoveringGraph:
-    async def ainvoke(self, *args, **kwargs) -> None:
-        del args, kwargs
-
-    async def aget_state(self, *args, **kwargs):
-        del args, kwargs
-        return SimpleNamespace(
-            config={"configurable": {"checkpoint_id": "recovered-checkpoint-h0-1"}}
-        )
-
-
-class _RecoveringH0Runtime(DeerFlowH0Runtime):
-    def __init__(self) -> None:
-        self._lock = asyncio.Lock()
-        self._run_manager = _RecoveringRunManager()
-        self._graph = _RecoveringGraph()
-        self._row = {
-            "execution_id": "execution-h0-recover",
-            "idempotency_key": "h0-recover-key",
-            "thread_id": "thread-h0-recover",
-            "request_hash": "request-hash-h0-recover",
-            "deerflow_run_id": None,
-            "status": "CREATING",
-            "checkpoint_id": None,
-            "result": None,
-            "cancel_action": None,
-            "created_at": "2026-08-14T00:00:00+00:00",
-            "updated_at": "2026-08-14T00:00:00+00:00",
-        }
-        self.events: list[str] = []
-
-    def _ensure_ready(self) -> None:
-        return None
-
-    async def _find_by_idempotency_key(self, idempotency_key: str):
-        return self._row if idempotency_key == self._row["idempotency_key"] else None
-
-    async def _find_by_execution_id(self, execution_id: str):
-        return self._row if execution_id == self._row["execution_id"] else None
-
-    async def _update_mapping(self, execution_id: str, **changes) -> None:
-        assert execution_id == self._row["execution_id"]
-        self._row.update(changes)
-        self._row["updated_at"] = "2026-08-14T00:01:00+00:00"
-
-    async def _put_event(
-        self,
-        thread_id: str,
-        run_id: str,
-        event_type: str,
-        category: str,
-        content: dict,
-    ) -> None:
-        del thread_id, run_id, category, content
-        self.events.append(event_type)
-
-    async def get_execution(self, execution_id: str) -> ExecutionSnapshot:
-        assert execution_id == self._row["execution_id"]
-        return ExecutionSnapshot(
-            execution_id=str(self._row["execution_id"]),
-            idempotency_key=str(self._row["idempotency_key"]),
-            thread_id=str(self._row["thread_id"]),
-            request_hash=str(self._row["request_hash"]),
-            deerflow_run_id=str(self._row["deerflow_run_id"]),
-            status=str(self._row["status"]),
-            checkpoint_id=str(self._row["checkpoint_id"]),
-            result=None,
-            cancel_action=None,
-            accepted_at=datetime.fromisoformat(str(self._row["created_at"])),
-            updated_at=datetime.fromisoformat(str(self._row["updated_at"])),
-        )
-
-
-def test_h0_exact_retry_recovers_a_creating_mapping() -> None:
-    async def verify() -> None:
-        runtime = _RecoveringH0Runtime()
-        request = StartExecutionRequest(
-            execution_id="execution-h0-recover",
-            idempotency_key="h0-recover-key",
-            thread_id="thread-h0-recover",
-            request_hash="request-hash-h0-recover",
-            prompt="resume the interrupted creation",
-        )
-
-        recovered = await runtime.start_execution(request)
-        replayed = await runtime.start_execution(request)
-
-        assert recovered.status == "WAITING_GUIDANCE"
-        assert replayed == recovered
-        assert runtime._run_manager.create_count == 1
-        assert runtime.events == [
-            "dianlian.h0.creation.recovered",
-            "dianlian.h0.started",
-            "dianlian.h0.checkpoint",
-        ]
 
     asyncio.run(verify())

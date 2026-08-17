@@ -236,8 +236,6 @@ class JavaModelGatewayChatModel(BaseChatModel):
             raise ModelGatewayOutcomeUnknown(
                 response.failure_code or "MODEL_GATEWAY_OUTCOME_UNKNOWN"
             )
-        if response.status == "USAGE_PENDING":
-            raise ModelGatewayFailedSafe("MODEL_USAGE_RECONCILIATION_REQUIRED")
         if response.status == "FAILED_SAFE":
             raise ModelGatewayFailedSafe(
                 response.failure_code or "MODEL_GATEWAY_FAILED"

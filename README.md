@@ -32,7 +32,8 @@ flowchart LR
     Java --> Truth["Tenant, ACL, task, billing and audit truth"]
     Java --> Runtime["FastAPI runtime boundary"]
     Runtime --> Context["Authorized knowledge and memory retrieval"]
-    Runtime --> Agents["Conditional agent runtimes"]
+    Runtime --> Supervisor["Durable run supervisor and permit gates"]
+    Supervisor --> Agents["Governed and structured agent workers"]
     Truth --> DB["PostgreSQL / pgvector"]
     Context --> DB
 ```
@@ -58,7 +59,7 @@ Read the concise [architecture overview](docs/architecture/overview.md) or the d
 | Versioned API and event contracts | Implemented | Public and internal OpenAPI plus AsyncAPI contracts and fixtures |
 | React application surfaces | Working prototype, API migration in progress | API mode fails visibly and does not fall back to demo facts |
 | FastAPI context boundary | Implemented and tested | Health, internal authentication, indexing, retrieval, migrations, and PostgreSQL integration |
-| Durable runtime foundations | Experimental and tested | Gated DeerFlow H0/H1 harnesses, explicit Supervisor migrations, lease/fencing primitives, and fail-closed external-permit authorization; production composition and cross-process takeover remain disabled |
+| Durable runtime foundations | Experimental, implemented, and tested | Gated DeerFlow H0/H1 harnesses, 23 explicit Supervisor migrations, lease/fencing and permit/arm/outcome boundaries, PostgreSQL checkpoints, cross-process takeover, and default-off governed/structured workers |
 | Production deployment | Not supported | Independent hardening, threat modeling, observability, and operational review are still required |
 
 See [ROADMAP.md](ROADMAP.md) for the planned sequence and [CHANGELOG.md](CHANGELOG.md) for released changes.

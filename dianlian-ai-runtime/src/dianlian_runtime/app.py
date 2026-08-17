@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+import json
 from typing import Annotated, Callable
 from uuid import UUID
 
@@ -9,6 +10,7 @@ from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from dianlian_runtime.auth import (
     InternalServiceAuthenticator,
@@ -65,7 +67,6 @@ from dianlian_runtime.harness.api_contracts import (
 from dianlian_runtime.harness.h0_runtime import (
     GuidanceOutcomeUnknown,
     GuidancePreconditionRejected,
-    H0IdempotencyConflict,
 )
 from dianlian_runtime.harness.h1_contracts import (
     CreateH1ExecutionRequest,
@@ -95,9 +96,65 @@ from dianlian_runtime.supervisor.authorizer import (
     create_postgres_permit_authorization_service,
 )
 from dianlian_runtime.supervisor.authorizer_contracts import (
+    ExternalDispatchArmProblem,
+    ExternalDispatchArmRequest,
+    ExternalDispatchArmResponse,
+    ExternalOperationOutcomeProblem,
+    ExternalOperationOutcomeRecordRequest,
+    ExternalOperationOutcomeReconcileRequest,
+    ExternalOperationOutcomeResponse,
     PermitAuthorizationProblem,
     PermitAuthorizationRequest,
     PermitAuthorizationResponse,
+    RuntimeRunAdmissionProblem,
+    RuntimeRunAdmissionRequest,
+    RuntimeRunAdmissionResponse,
+    RuntimeRunCancelProblem,
+    RuntimeRunCancelRequest,
+    RuntimeRunCancelResponse,
+)
+from dianlian_runtime.supervisor.control import (
+    RuntimeRunCancelConflict,
+    RuntimeRunCancelInvalidCommand,
+    RuntimeRunCancelService,
+    RuntimeRunCancelUnavailable,
+    UnavailableRuntimeRunCancelService,
+    create_postgres_runtime_run_cancel_service,
+)
+from dianlian_runtime.supervisor.dispatch_authorizer import (
+    ExternalDispatchArmConflict,
+    ExternalDispatchArmInvalidCommand,
+    ExternalDispatchArmService,
+    ExternalDispatchArmUnavailable,
+    UnavailableExternalDispatchArmService,
+    create_postgres_external_dispatch_arm_service,
+)
+from dianlian_runtime.supervisor.outcome_reconciler import (
+    ExternalOperationOutcomeConflict,
+    ExternalOperationOutcomeInvalidCommand,
+    ExternalOperationOutcomeService,
+    ExternalOperationOutcomeUnavailable,
+    UnavailableExternalOperationOutcomeService,
+    create_postgres_external_operation_outcome_service,
+)
+from dianlian_runtime.supervisor.run_admitter import (
+    RuntimeRunAdmissionConflict,
+    RuntimeRunAdmissionInvalidCommand,
+    RuntimeRunAdmissionService,
+    RuntimeRunAdmissionUnavailable,
+    UnavailableRuntimeRunAdmissionService,
+    create_postgres_runtime_run_admission_service,
+)
+from dianlian_runtime.supervisor.run_projection import (
+    RuntimeRunProjectionInvalidQuery,
+    RuntimeRunProjectionNotFound,
+    RuntimeRunProjectionProblem,
+    RuntimeRunProjectionRequest,
+    RuntimeRunProjectionResponse,
+    RuntimeRunProjectionService,
+    RuntimeRunProjectionUnavailable,
+    UnavailableRuntimeRunProjectionService,
+    create_postgres_runtime_run_projection_service,
 )
 
 
@@ -107,6 +164,197 @@ _INTERNAL_SERVICE_BEARER = HTTPBearer(
     description="Dedicated RS256 Service JWT; user access tokens are not accepted.",
     auto_error=False,
 )
+_PERMIT_AUTHORIZATION_ROUTE = (
+    "/internal/v1/runtime-supervisor/external-permits/consume-and-authorize"
+)
+_EXTERNAL_DISPATCH_ARM_ROUTE = (
+    "/internal/v1/runtime-supervisor/external-dispatches/consume-and-arm"
+)
+_EXTERNAL_OUTCOME_RECORD_ROUTE = (
+    "/internal/v1/runtime-supervisor/external-operation-outcomes/record"
+)
+_EXTERNAL_OUTCOME_RECONCILE_ROUTE = (
+    "/internal/v1/runtime-supervisor/external-operation-outcomes/reconcile"
+)
+_RUNTIME_RUN_ADMISSION_ROUTE = (
+    "/internal/v1/runtime-supervisor/run-admissions/admit"
+)
+_RUNTIME_RUN_PROJECTION_ROUTE = (
+    "/internal/v1/runtime-supervisor/run-projections/read"
+)
+_RUNTIME_RUN_CANCEL_ROUTE = (
+    "/internal/v1/runtime-supervisor/run-cancellations/request"
+)
+_HIGH_AUTHORITY_JSON_BODY_LIMIT_BYTES = 8 * 1024
+_RUNTIME_RUN_ADMISSION_BODY_LIMIT_BYTES = 32 * 1024
+_HIGH_AUTHORITY_JSON_PROBLEMS = {
+    _PERMIT_AUTHORIZATION_ROUTE: (
+        "PERMIT_AUTHORIZATION_REQUEST_INVALID",
+        "The permit authorization request is invalid",
+        "PERMIT_AUTHORIZATION_REQUEST_TOO_LARGE",
+        "The permit authorization request is too large",
+    ),
+    _EXTERNAL_DISPATCH_ARM_ROUTE: (
+        "EXTERNAL_DISPATCH_ARM_REQUEST_INVALID",
+        "The external dispatch arm request is invalid",
+        "EXTERNAL_DISPATCH_ARM_REQUEST_TOO_LARGE",
+        "The external dispatch arm request is too large",
+    ),
+    _EXTERNAL_OUTCOME_RECORD_ROUTE: (
+        "EXTERNAL_OUTCOME_RECORD_REQUEST_INVALID",
+        "The external operation outcome record request is invalid",
+        "EXTERNAL_OUTCOME_RECORD_REQUEST_TOO_LARGE",
+        "The external operation outcome record request is too large",
+    ),
+    _EXTERNAL_OUTCOME_RECONCILE_ROUTE: (
+        "EXTERNAL_OUTCOME_RECONCILE_REQUEST_INVALID",
+        "The external operation outcome reconciliation request is invalid",
+        "EXTERNAL_OUTCOME_RECONCILE_REQUEST_TOO_LARGE",
+        "The external operation outcome reconciliation request is too large",
+    ),
+    _RUNTIME_RUN_CANCEL_ROUTE: (
+        "RUNTIME_RUN_CANCEL_REQUEST_INVALID",
+        "The runtime Run cancel request is invalid",
+        "RUNTIME_RUN_CANCEL_REQUEST_TOO_LARGE",
+        "The runtime Run cancel request is too large",
+    ),
+    _RUNTIME_RUN_ADMISSION_ROUTE: (
+        "RUNTIME_RUN_ADMISSION_REQUEST_INVALID",
+        "The runtime Run admission request is invalid",
+        "RUNTIME_RUN_ADMISSION_REQUEST_TOO_LARGE",
+        "The runtime Run admission request is too large",
+    ),
+    _RUNTIME_RUN_PROJECTION_ROUTE: (
+        "RUNTIME_RUN_PROJECTION_REQUEST_INVALID",
+        "The runtime Run projection request is invalid",
+        "RUNTIME_RUN_PROJECTION_REQUEST_TOO_LARGE",
+        "The runtime Run projection request is too large",
+    ),
+}
+
+
+class _DuplicateJsonKey(ValueError):
+    pass
+
+
+def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    value: dict[str, object] = {}
+    for key, item in pairs:
+        if key in value:
+            raise _DuplicateJsonKey("duplicate JSON key")
+        value[key] = item
+    return value
+
+
+class _HighAuthorityJsonBodyGuard:
+    """Bound and strictly decode only the two high-authority JSON commands."""
+
+    def __init__(self, app: ASGIApp, active_paths: frozenset[str]) -> None:
+        self._app = app
+        self._active_paths = active_paths
+
+    async def __call__(
+        self,
+        scope: Scope,
+        receive: Receive,
+        send: Send,
+    ) -> None:
+        path = scope.get("path")
+        if (
+            scope["type"] != "http"
+            or scope.get("method") != "POST"
+            or path not in self._active_paths
+        ):
+            await self._app(scope, receive, send)
+            return
+
+        body = bytearray()
+        while True:
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                return
+            if message["type"] != "http.request":
+                continue
+            body.extend(message.get("body", b""))
+            body_limit = (
+                _RUNTIME_RUN_ADMISSION_BODY_LIMIT_BYTES
+                if path == _RUNTIME_RUN_ADMISSION_ROUTE
+                else _HIGH_AUTHORITY_JSON_BODY_LIMIT_BYTES
+            )
+            if len(body) > body_limit:
+                assert isinstance(path, str)
+                await _send_high_authority_guard_problem(
+                    scope,
+                    receive,
+                    send,
+                    path=path,
+                    status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                    too_large=True,
+                )
+                return
+            if not message.get("more_body", False):
+                break
+
+        try:
+            parsed_body = json.loads(
+                bytes(body).decode("utf-8"),
+                object_pairs_hook=_reject_duplicate_json_keys,
+            )
+            if not isinstance(parsed_body, dict):
+                raise _DuplicateJsonKey("top-level JSON value must be an object")
+        except (
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+            _DuplicateJsonKey,
+            RecursionError,
+        ):
+            assert isinstance(path, str)
+            await _send_high_authority_guard_problem(
+                scope,
+                receive,
+                send,
+                path=path,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                too_large=False,
+            )
+            return
+
+        replayed = False
+
+        async def replay_receive() -> Message:
+            nonlocal replayed
+            if replayed:
+                return {"type": "http.request", "body": b"", "more_body": False}
+            replayed = True
+            return {
+                "type": "http.request",
+                "body": bytes(body),
+                "more_body": False,
+            }
+
+        await self._app(scope, replay_receive, send)
+
+
+async def _send_high_authority_guard_problem(
+    scope: Scope,
+    receive: Receive,
+    send: Send,
+    *,
+    path: str,
+    status_code: int,
+    too_large: bool,
+) -> None:
+    invalid_code, invalid_message, too_large_code, too_large_message = (
+        _HIGH_AUTHORITY_JSON_PROBLEMS[path]
+    )
+    response = JSONResponse(
+        status_code=status_code,
+        content={
+            "code": too_large_code if too_large else invalid_code,
+            "message": too_large_message if too_large else invalid_message,
+        },
+    )
+    await response(scope, receive, send)
 
 
 def _require_internal_service_scope(
@@ -128,6 +376,30 @@ def _require_internal_service_scope(
     return authorize
 
 
+def _require_exact_internal_service_scope(
+    required_scope: InternalServiceScope,
+) -> Callable[..., InternalServicePrincipal]:
+    def authorize(
+        request: Request,
+        credentials: Annotated[
+            HTTPAuthorizationCredentials | None,
+            Security(_INTERNAL_SERVICE_BEARER),
+        ],
+    ) -> InternalServicePrincipal:
+        token = "" if credentials is None else credentials.credentials
+        principal = request.app.state.internal_service_authenticator.authorize(
+            token,
+            required_scope,
+        )
+        if principal.scopes != frozenset({required_scope}):
+            raise InternalServiceScopeDenied(
+                "high-authority internal service token must have one exact scope"
+            )
+        return principal
+
+    return authorize
+
+
 _REQUIRE_CONTEXT_RETRIEVE = _require_internal_service_scope(
     InternalServiceScope.CONTEXT_RETRIEVE
 )
@@ -137,8 +409,26 @@ _REQUIRE_CONTEXT_INDEX_WRITE = _require_internal_service_scope(
 _REQUIRE_AGENT_RUNTIME_EXECUTE = _require_internal_service_scope(
     InternalServiceScope.AGENT_RUNTIME_EXECUTE
 )
-_REQUIRE_RUNTIME_EXTERNAL_PERMIT_AUTHORIZE = _require_internal_service_scope(
+_REQUIRE_RUNTIME_EXTERNAL_PERMIT_AUTHORIZE = _require_exact_internal_service_scope(
     InternalServiceScope.RUNTIME_EXTERNAL_PERMIT_AUTHORIZE
+)
+_REQUIRE_RUNTIME_EXTERNAL_DISPATCH_ARM = _require_exact_internal_service_scope(
+    InternalServiceScope.RUNTIME_EXTERNAL_DISPATCH_ARM
+)
+_REQUIRE_RUNTIME_EXTERNAL_OUTCOME_RECORD = _require_exact_internal_service_scope(
+    InternalServiceScope.RUNTIME_EXTERNAL_OUTCOME_RECORD
+)
+_REQUIRE_RUNTIME_EXTERNAL_OUTCOME_RECONCILE = _require_exact_internal_service_scope(
+    InternalServiceScope.RUNTIME_EXTERNAL_OUTCOME_RECONCILE
+)
+_REQUIRE_RUNTIME_RUN_ADMIT = _require_exact_internal_service_scope(
+    InternalServiceScope.RUNTIME_RUN_ADMIT
+)
+_REQUIRE_RUNTIME_RUN_OBSERVE = _require_exact_internal_service_scope(
+    InternalServiceScope.RUNTIME_RUN_OBSERVE
+)
+_REQUIRE_RUNTIME_RUN_CANCEL = _require_exact_internal_service_scope(
+    InternalServiceScope.RUNTIME_RUN_CANCEL
 )
 
 
@@ -151,6 +441,11 @@ def create_app(
     agent_h1_runtime: DeerFlowH1Runtime | None = None,
     run_supervisor: RunSupervisor | None = None,
     permit_authorization_service: PermitAuthorizationService | None = None,
+    external_dispatch_arm_service: ExternalDispatchArmService | None = None,
+    external_operation_outcome_service: ExternalOperationOutcomeService | None = None,
+    runtime_run_admission_service: RuntimeRunAdmissionService | None = None,
+    runtime_run_projection_service: RuntimeRunProjectionService | None = None,
+    runtime_run_cancel_service: RuntimeRunCancelService | None = None,
 ) -> FastAPI:
     runtime_settings = settings or RuntimeSettings.from_environment()
     active_internal_service_authenticator = (
@@ -224,6 +519,24 @@ def create_app(
         )
 
     active_run_supervisor = run_supervisor
+    if (
+        runtime_settings.governed_h12_driver_enabled
+        and active_run_supervisor is None
+    ):
+        from dianlian_runtime.supervisor.composition import (
+            create_governed_h12_run_supervisor,
+        )
+
+        active_run_supervisor = create_governed_h12_run_supervisor(runtime_settings)
+    elif (
+        runtime_settings.structured_driver_enabled
+        and active_run_supervisor is None
+    ):
+        from dianlian_runtime.supervisor.composition import (
+            create_structured_run_supervisor,
+        )
+
+        active_run_supervisor = create_structured_run_supervisor(runtime_settings)
 
     if not runtime_settings.permit_authorizer_enabled:
         active_permit_authorization_service: PermitAuthorizationService = (
@@ -249,6 +562,122 @@ def create_app(
             )
         )
 
+    if not runtime_settings.dispatch_authorizer_enabled:
+        active_external_dispatch_arm_service: ExternalDispatchArmService = (
+            UnavailableExternalDispatchArmService()
+        )
+    elif external_dispatch_arm_service is not None:
+        active_external_dispatch_arm_service = external_dispatch_arm_service
+    elif runtime_settings.dispatch_authorizer_database_dsn is None:
+        active_external_dispatch_arm_service = UnavailableExternalDispatchArmService()
+    else:
+        active_external_dispatch_arm_service = (
+            create_postgres_external_dispatch_arm_service(
+                runtime_settings.dispatch_authorizer_database_dsn,
+                connect_timeout_seconds=(
+                    runtime_settings.dispatch_authorizer_database_connect_timeout_seconds
+                ),
+                statement_timeout_seconds=(
+                    runtime_settings.dispatch_authorizer_database_statement_timeout_seconds
+                ),
+                lock_timeout_seconds=(
+                    runtime_settings.dispatch_authorizer_database_lock_timeout_seconds
+                ),
+            )
+        )
+
+    if not runtime_settings.outcome_reconciler_enabled:
+        active_external_operation_outcome_service: ExternalOperationOutcomeService = (
+            UnavailableExternalOperationOutcomeService()
+        )
+    elif external_operation_outcome_service is not None:
+        active_external_operation_outcome_service = external_operation_outcome_service
+    elif runtime_settings.outcome_reconciler_database_dsn is None:
+        active_external_operation_outcome_service = (
+            UnavailableExternalOperationOutcomeService()
+        )
+    else:
+        active_external_operation_outcome_service = (
+            create_postgres_external_operation_outcome_service(
+                runtime_settings.outcome_reconciler_database_dsn,
+                connect_timeout_seconds=(
+                    runtime_settings.outcome_reconciler_database_connect_timeout_seconds
+                ),
+                statement_timeout_seconds=(
+                    runtime_settings.outcome_reconciler_database_statement_timeout_seconds
+                ),
+                lock_timeout_seconds=(
+                    runtime_settings.outcome_reconciler_database_lock_timeout_seconds
+                ),
+            )
+        )
+
+    if not runtime_settings.run_admitter_enabled:
+        active_runtime_run_admission_service: RuntimeRunAdmissionService = (
+            UnavailableRuntimeRunAdmissionService()
+        )
+    elif runtime_run_admission_service is not None:
+        active_runtime_run_admission_service = runtime_run_admission_service
+    elif runtime_settings.run_admitter_database_dsn is None:
+        active_runtime_run_admission_service = UnavailableRuntimeRunAdmissionService()
+    else:
+        active_runtime_run_admission_service = create_postgres_runtime_run_admission_service(
+            runtime_settings.run_admitter_database_dsn,
+            connect_timeout_seconds=(
+                runtime_settings.run_admitter_database_connect_timeout_seconds
+            ),
+            statement_timeout_seconds=(
+                runtime_settings.run_admitter_database_statement_timeout_seconds
+            ),
+            lock_timeout_seconds=(
+                runtime_settings.run_admitter_database_lock_timeout_seconds
+            ),
+        )
+
+    if not runtime_settings.run_observer_enabled:
+        active_runtime_run_projection_service: RuntimeRunProjectionService = (
+            UnavailableRuntimeRunProjectionService()
+        )
+    elif runtime_run_projection_service is not None:
+        active_runtime_run_projection_service = runtime_run_projection_service
+    elif runtime_settings.run_observer_database_dsn is None:
+        active_runtime_run_projection_service = UnavailableRuntimeRunProjectionService()
+    else:
+        active_runtime_run_projection_service = create_postgres_runtime_run_projection_service(
+            runtime_settings.run_observer_database_dsn,
+            connect_timeout_seconds=(
+                runtime_settings.run_observer_database_connect_timeout_seconds
+            ),
+            statement_timeout_seconds=(
+                runtime_settings.run_observer_database_statement_timeout_seconds
+            ),
+            lock_timeout_seconds=(
+                runtime_settings.run_observer_database_lock_timeout_seconds
+            ),
+        )
+
+    if not runtime_settings.run_controller_enabled:
+        active_runtime_run_cancel_service: RuntimeRunCancelService = (
+            UnavailableRuntimeRunCancelService()
+        )
+    elif runtime_run_cancel_service is not None:
+        active_runtime_run_cancel_service = runtime_run_cancel_service
+    elif runtime_settings.run_controller_database_dsn is None:
+        active_runtime_run_cancel_service = UnavailableRuntimeRunCancelService()
+    else:
+        active_runtime_run_cancel_service = create_postgres_runtime_run_cancel_service(
+            runtime_settings.run_controller_database_dsn,
+            connect_timeout_seconds=(
+                runtime_settings.run_controller_database_connect_timeout_seconds
+            ),
+            statement_timeout_seconds=(
+                runtime_settings.run_controller_database_statement_timeout_seconds
+            ),
+            lock_timeout_seconds=(
+                runtime_settings.run_controller_database_lock_timeout_seconds
+            ),
+        )
+
     lifecycle_services = list(
         {
             id(service): service
@@ -256,6 +685,11 @@ def create_app(
                 active_context_service,
                 active_indexing_service,
                 active_permit_authorization_service,
+                active_external_dispatch_arm_service,
+                active_external_operation_outcome_service,
+                active_runtime_run_admission_service,
+                active_runtime_run_projection_service,
+                active_runtime_run_cancel_service,
             )
             if hasattr(service, "start") or hasattr(service, "close")
         }.values()
@@ -304,6 +738,23 @@ def create_app(
         openapi_url="/internal/v1/openapi.json",
         lifespan=lifespan,
     )
+    guarded_high_authority_paths = frozenset(
+        path
+        for enabled, path in (
+            (runtime_settings.permit_authorizer_enabled, _PERMIT_AUTHORIZATION_ROUTE),
+            (runtime_settings.dispatch_authorizer_enabled, _EXTERNAL_DISPATCH_ARM_ROUTE),
+            (runtime_settings.outcome_reconciler_enabled, _EXTERNAL_OUTCOME_RECORD_ROUTE),
+            (runtime_settings.outcome_reconciler_enabled, _EXTERNAL_OUTCOME_RECONCILE_ROUTE),
+            (runtime_settings.run_admitter_enabled, _RUNTIME_RUN_ADMISSION_ROUTE),
+            (runtime_settings.run_observer_enabled, _RUNTIME_RUN_PROJECTION_ROUTE),
+            (runtime_settings.run_controller_enabled, _RUNTIME_RUN_CANCEL_ROUTE),
+        )
+        if enabled
+    )
+    app.add_middleware(
+        _HighAuthorityJsonBodyGuard,
+        active_paths=guarded_high_authority_paths,
+    )
     app.state.settings = runtime_settings
     app.state.context_retrieval_service = active_context_service
     app.state.context_indexing_service = active_indexing_service
@@ -312,6 +763,11 @@ def create_app(
     app.state.agent_h1_runtime = active_agent_h1
     app.state.run_supervisor = active_run_supervisor
     app.state.permit_authorization_service = active_permit_authorization_service
+    app.state.external_dispatch_arm_service = active_external_dispatch_arm_service
+    app.state.external_operation_outcome_service = active_external_operation_outcome_service
+    app.state.runtime_run_admission_service = active_runtime_run_admission_service
+    app.state.runtime_run_projection_service = active_runtime_run_projection_service
+    app.state.runtime_run_cancel_service = active_runtime_run_cancel_service
 
     @app.exception_handler(InternalServiceAuthUnavailable)
     async def internal_service_auth_unavailable(
@@ -392,18 +848,230 @@ def create_app(
             "Permit authorization is unavailable",
         )
 
+    @app.exception_handler(ExternalDispatchArmInvalidCommand)
+    async def external_dispatch_arm_invalid_command(
+        request: Request,
+        exception: ExternalDispatchArmInvalidCommand,
+    ) -> JSONResponse:
+        del request, exception
+        return _external_dispatch_arm_problem(
+            status.HTTP_400_BAD_REQUEST,
+            "EXTERNAL_DISPATCH_ARM_REQUEST_INVALID",
+            "The external dispatch arm request is invalid",
+        )
+
+    @app.exception_handler(ExternalDispatchArmConflict)
+    async def external_dispatch_arm_conflict(
+        request: Request,
+        exception: ExternalDispatchArmConflict,
+    ) -> JSONResponse:
+        del request, exception
+        return _external_dispatch_arm_problem(
+            status.HTTP_409_CONFLICT,
+            "EXTERNAL_DISPATCH_ARM_CONFLICT",
+            "The external dispatch arm request conflicts with durable state",
+        )
+
+    @app.exception_handler(ExternalDispatchArmUnavailable)
+    async def external_dispatch_arm_unavailable(
+        request: Request,
+        exception: ExternalDispatchArmUnavailable,
+    ) -> JSONResponse:
+        del request, exception
+        return _external_dispatch_arm_problem(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "EXTERNAL_DISPATCH_ARM_UNAVAILABLE",
+            "External dispatch arm is unavailable",
+        )
+
+    @app.exception_handler(ExternalOperationOutcomeInvalidCommand)
+    async def external_operation_outcome_invalid_command(
+        request: Request,
+        exception: ExternalOperationOutcomeInvalidCommand,
+    ) -> JSONResponse:
+        del request, exception
+        return _external_operation_outcome_problem(
+            status.HTTP_400_BAD_REQUEST,
+            "EXTERNAL_OPERATION_OUTCOME_REQUEST_INVALID",
+            "The external operation outcome request is invalid",
+        )
+
+    @app.exception_handler(ExternalOperationOutcomeConflict)
+    async def external_operation_outcome_conflict(
+        request: Request,
+        exception: ExternalOperationOutcomeConflict,
+    ) -> JSONResponse:
+        del request, exception
+        return _external_operation_outcome_problem(
+            status.HTTP_409_CONFLICT,
+            "EXTERNAL_OPERATION_OUTCOME_CONFLICT",
+            "The external operation outcome request conflicts with durable state",
+        )
+
+    @app.exception_handler(ExternalOperationOutcomeUnavailable)
+    async def external_operation_outcome_unavailable(
+        request: Request,
+        exception: ExternalOperationOutcomeUnavailable,
+    ) -> JSONResponse:
+        del request, exception
+        return _external_operation_outcome_problem(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "EXTERNAL_OPERATION_OUTCOME_UNAVAILABLE",
+            "External operation outcome reconciliation is unavailable",
+        )
+
+    @app.exception_handler(RuntimeRunAdmissionInvalidCommand)
+    async def runtime_run_admission_invalid_command(
+        request: Request,
+        exception: RuntimeRunAdmissionInvalidCommand,
+    ) -> JSONResponse:
+        del request, exception
+        return _runtime_run_admission_problem(
+            status.HTTP_400_BAD_REQUEST,
+            "RUNTIME_RUN_ADMISSION_REQUEST_INVALID",
+            "The runtime Run admission request is invalid",
+        )
+
+    @app.exception_handler(RuntimeRunAdmissionConflict)
+    async def runtime_run_admission_conflict(
+        request: Request,
+        exception: RuntimeRunAdmissionConflict,
+    ) -> JSONResponse:
+        del request, exception
+        return _runtime_run_admission_problem(
+            status.HTTP_409_CONFLICT,
+            "RUNTIME_RUN_ADMISSION_CONFLICT",
+            "The runtime Run admission request conflicts with durable state",
+        )
+
+    @app.exception_handler(RuntimeRunAdmissionUnavailable)
+    async def runtime_run_admission_unavailable(
+        request: Request,
+        exception: RuntimeRunAdmissionUnavailable,
+    ) -> JSONResponse:
+        del request, exception
+        return _runtime_run_admission_problem(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "RUNTIME_RUN_ADMISSION_UNAVAILABLE",
+            "Runtime Run admission is unavailable",
+        )
+
+    @app.exception_handler(RuntimeRunProjectionInvalidQuery)
+    async def runtime_run_projection_invalid_query(
+        request: Request,
+        exception: RuntimeRunProjectionInvalidQuery,
+    ) -> JSONResponse:
+        del request, exception
+        return _runtime_run_projection_problem(
+            status.HTTP_400_BAD_REQUEST,
+            "RUNTIME_RUN_PROJECTION_REQUEST_INVALID",
+            "The runtime Run projection request is invalid",
+        )
+
+    @app.exception_handler(RuntimeRunProjectionNotFound)
+    async def runtime_run_projection_not_found(
+        request: Request,
+        exception: RuntimeRunProjectionNotFound,
+    ) -> JSONResponse:
+        del request, exception
+        return _runtime_run_projection_problem(
+            status.HTTP_404_NOT_FOUND,
+            "RUNTIME_RUN_PROJECTION_NOT_FOUND",
+            "The runtime Run projection was not found",
+        )
+
+    @app.exception_handler(RuntimeRunProjectionUnavailable)
+    async def runtime_run_projection_unavailable(
+        request: Request,
+        exception: RuntimeRunProjectionUnavailable,
+    ) -> JSONResponse:
+        del request, exception
+        return _runtime_run_projection_problem(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "RUNTIME_RUN_PROJECTION_UNAVAILABLE",
+            "Runtime Run projection is unavailable",
+        )
+
+    @app.exception_handler(RuntimeRunCancelInvalidCommand)
+    async def runtime_run_cancel_invalid_command(
+        request: Request,
+        exception: RuntimeRunCancelInvalidCommand,
+    ) -> JSONResponse:
+        del request, exception
+        return _runtime_run_cancel_problem(
+            status.HTTP_400_BAD_REQUEST,
+            "RUNTIME_RUN_CANCEL_REQUEST_INVALID",
+            "The runtime Run cancel request is invalid",
+        )
+
+    @app.exception_handler(RuntimeRunCancelConflict)
+    async def runtime_run_cancel_conflict(
+        request: Request,
+        exception: RuntimeRunCancelConflict,
+    ) -> JSONResponse:
+        del request, exception
+        return _runtime_run_cancel_problem(
+            status.HTTP_409_CONFLICT,
+            "RUNTIME_RUN_CANCEL_CONFLICT",
+            "The runtime Run cancel request conflicts with durable state",
+        )
+
+    @app.exception_handler(RuntimeRunCancelUnavailable)
+    async def runtime_run_cancel_unavailable(
+        request: Request,
+        exception: RuntimeRunCancelUnavailable,
+    ) -> JSONResponse:
+        del request, exception
+        return _runtime_run_cancel_problem(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "RUNTIME_RUN_CANCEL_UNAVAILABLE",
+            "Runtime Run cancellation is unavailable",
+        )
+
     @app.exception_handler(RequestValidationError)
     async def request_validation_error(
         request: Request,
         exception: RequestValidationError,
     ) -> JSONResponse:
         if request.url.path == (
-            "/internal/v1/runtime-supervisor/external-permits/consume-and-authorize"
+            _PERMIT_AUTHORIZATION_ROUTE
         ):
             return _permit_authorization_problem(
                 status.HTTP_422_UNPROCESSABLE_CONTENT,
                 "PERMIT_AUTHORIZATION_REQUEST_INVALID",
                 "The permit authorization request is invalid",
+            )
+        if request.url.path == (
+            _EXTERNAL_DISPATCH_ARM_ROUTE
+        ):
+            return _external_dispatch_arm_problem(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "EXTERNAL_DISPATCH_ARM_REQUEST_INVALID",
+                "The external dispatch arm request is invalid",
+            )
+        if request.url.path == _EXTERNAL_OUTCOME_RECORD_ROUTE:
+            return _external_operation_outcome_problem(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "EXTERNAL_OUTCOME_RECORD_REQUEST_INVALID",
+                "The external operation outcome record request is invalid",
+            )
+        if request.url.path == _EXTERNAL_OUTCOME_RECONCILE_ROUTE:
+            return _external_operation_outcome_problem(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "EXTERNAL_OUTCOME_RECONCILE_REQUEST_INVALID",
+                "The external operation outcome reconciliation request is invalid",
+            )
+        if request.url.path == _RUNTIME_RUN_CANCEL_ROUTE:
+            return _runtime_run_cancel_problem(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "RUNTIME_RUN_CANCEL_REQUEST_INVALID",
+                "The runtime Run cancel request is invalid",
+            )
+        if request.url.path == _RUNTIME_RUN_ADMISSION_ROUTE:
+            return _runtime_run_admission_problem(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "RUNTIME_RUN_ADMISSION_REQUEST_INVALID",
+                "The runtime Run admission request is invalid",
             )
         return await request_validation_exception_handler(request, exception)
 
@@ -487,6 +1155,21 @@ def create_app(
             ) and (
                 not runtime_settings.permit_authorizer_enabled
                 or active_permit_authorization_service.ready
+            ) and (
+                not runtime_settings.dispatch_authorizer_enabled
+                or active_external_dispatch_arm_service.ready
+            ) and (
+                not runtime_settings.outcome_reconciler_enabled
+                or active_external_operation_outcome_service.ready
+            ) and (
+                not runtime_settings.run_admitter_enabled
+                or active_runtime_run_admission_service.ready
+            ) and (
+                not runtime_settings.run_observer_enabled
+                or active_runtime_run_projection_service.ready
+            ) and (
+                not runtime_settings.run_controller_enabled
+                or active_runtime_run_cancel_service.ready
             )
         if not ready:
             response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
@@ -606,6 +1289,9 @@ def create_app(
             status.HTTP_401_UNAUTHORIZED: {"model": PermitAuthorizationProblem},
             status.HTTP_403_FORBIDDEN: {"model": PermitAuthorizationProblem},
             status.HTTP_409_CONFLICT: {"model": PermitAuthorizationProblem},
+            status.HTTP_413_CONTENT_TOO_LARGE: {
+                "model": PermitAuthorizationProblem
+            },
             status.HTTP_422_UNPROCESSABLE_CONTENT: {
                 "model": PermitAuthorizationProblem
             },
@@ -615,7 +1301,7 @@ def create_app(
         }
 
         @app.post(
-            "/internal/v1/runtime-supervisor/external-permits/consume-and-authorize",
+            _PERMIT_AUTHORIZATION_ROUTE,
             response_model=PermitAuthorizationResponse,
             response_model_by_alias=True,
             openapi_extra={
@@ -635,6 +1321,206 @@ def create_app(
                 consumed_by=principal.subject,
             )
             return PermitAuthorizationResponse(outcome=outcome)
+
+    if runtime_settings.dispatch_authorizer_enabled:
+        external_dispatch_arm_responses = {
+            status.HTTP_400_BAD_REQUEST: {"model": ExternalDispatchArmProblem},
+            status.HTTP_401_UNAUTHORIZED: {"model": ExternalDispatchArmProblem},
+            status.HTTP_403_FORBIDDEN: {"model": ExternalDispatchArmProblem},
+            status.HTTP_409_CONFLICT: {"model": ExternalDispatchArmProblem},
+            status.HTTP_413_CONTENT_TOO_LARGE: {
+                "model": ExternalDispatchArmProblem
+            },
+            status.HTTP_422_UNPROCESSABLE_CONTENT: {
+                "model": ExternalDispatchArmProblem
+            },
+            status.HTTP_503_SERVICE_UNAVAILABLE: {
+                "model": ExternalDispatchArmProblem
+            },
+        }
+
+        @app.post(
+            _EXTERNAL_DISPATCH_ARM_ROUTE,
+            response_model=ExternalDispatchArmResponse,
+            response_model_by_alias=True,
+            openapi_extra={"x-required-scopes": ["runtime.external-dispatch.arm"]},
+            responses=external_dispatch_arm_responses,
+        )
+        def consume_and_arm_external_dispatch(
+            request: ExternalDispatchArmRequest,
+            principal: Annotated[
+                InternalServicePrincipal,
+                Depends(_REQUIRE_RUNTIME_EXTERNAL_DISPATCH_ARM),
+            ],
+        ) -> ExternalDispatchArmResponse:
+            arm_result = active_external_dispatch_arm_service.arm(
+                request,
+                armed_by=principal.subject,
+            )
+            return ExternalDispatchArmResponse.from_result(arm_result)
+
+    if runtime_settings.outcome_reconciler_enabled:
+        external_operation_outcome_responses = {
+            status.HTTP_400_BAD_REQUEST: {"model": ExternalOperationOutcomeProblem},
+            status.HTTP_401_UNAUTHORIZED: {"model": ExternalOperationOutcomeProblem},
+            status.HTTP_403_FORBIDDEN: {"model": ExternalOperationOutcomeProblem},
+            status.HTTP_409_CONFLICT: {"model": ExternalOperationOutcomeProblem},
+            status.HTTP_413_CONTENT_TOO_LARGE: {
+                "model": ExternalOperationOutcomeProblem
+            },
+            status.HTTP_422_UNPROCESSABLE_CONTENT: {
+                "model": ExternalOperationOutcomeProblem
+            },
+            status.HTTP_503_SERVICE_UNAVAILABLE: {
+                "model": ExternalOperationOutcomeProblem
+            },
+        }
+
+        @app.post(
+            _EXTERNAL_OUTCOME_RECORD_ROUTE,
+            response_model=ExternalOperationOutcomeResponse,
+            response_model_by_alias=True,
+            openapi_extra={"x-required-scopes": ["runtime.external-outcome.record"]},
+            responses=external_operation_outcome_responses,
+        )
+        def record_external_operation_outcome(
+            request: ExternalOperationOutcomeRecordRequest,
+            principal: Annotated[
+                InternalServicePrincipal,
+                Depends(_REQUIRE_RUNTIME_EXTERNAL_OUTCOME_RECORD),
+            ],
+        ) -> ExternalOperationOutcomeResponse:
+            outcome = active_external_operation_outcome_service.record(
+                request,
+                recorded_by=principal.subject,
+            )
+            return ExternalOperationOutcomeResponse(outcome=outcome)
+
+        @app.post(
+            _EXTERNAL_OUTCOME_RECONCILE_ROUTE,
+            response_model=ExternalOperationOutcomeResponse,
+            response_model_by_alias=True,
+            openapi_extra={
+                "x-required-scopes": ["runtime.external-outcome.reconcile"]
+            },
+            responses=external_operation_outcome_responses,
+        )
+        def reconcile_external_operation_outcome(
+            request: ExternalOperationOutcomeReconcileRequest,
+            principal: Annotated[
+                InternalServicePrincipal,
+                Depends(_REQUIRE_RUNTIME_EXTERNAL_OUTCOME_RECONCILE),
+            ],
+        ) -> ExternalOperationOutcomeResponse:
+            outcome = active_external_operation_outcome_service.reconcile(
+                request,
+                recorded_by=principal.subject,
+            )
+            return ExternalOperationOutcomeResponse(outcome=outcome)
+
+    if runtime_settings.run_admitter_enabled:
+        runtime_run_admission_responses = {
+            status.HTTP_400_BAD_REQUEST: {"model": RuntimeRunAdmissionProblem},
+            status.HTTP_401_UNAUTHORIZED: {"model": RuntimeRunAdmissionProblem},
+            status.HTTP_403_FORBIDDEN: {"model": RuntimeRunAdmissionProblem},
+            status.HTTP_409_CONFLICT: {"model": RuntimeRunAdmissionProblem},
+            status.HTTP_413_CONTENT_TOO_LARGE: {
+                "model": RuntimeRunAdmissionProblem
+            },
+            status.HTTP_422_UNPROCESSABLE_CONTENT: {
+                "model": RuntimeRunAdmissionProblem
+            },
+            status.HTTP_503_SERVICE_UNAVAILABLE: {
+                "model": RuntimeRunAdmissionProblem
+            },
+        }
+
+        @app.post(
+            _RUNTIME_RUN_ADMISSION_ROUTE,
+            response_model=RuntimeRunAdmissionResponse,
+            response_model_by_alias=True,
+            openapi_extra={"x-required-scopes": ["runtime.run.admit"]},
+            responses=runtime_run_admission_responses,
+        )
+        def admit_runtime_run(
+            request: RuntimeRunAdmissionRequest,
+            principal: Annotated[
+                InternalServicePrincipal,
+                Depends(_REQUIRE_RUNTIME_RUN_ADMIT),
+            ],
+        ) -> RuntimeRunAdmissionResponse:
+            del principal
+            outcome = active_runtime_run_admission_service.admit(request)
+            return RuntimeRunAdmissionResponse(outcome=outcome)
+
+    if runtime_settings.run_observer_enabled:
+        runtime_run_projection_responses = {
+            status.HTTP_400_BAD_REQUEST: {"model": RuntimeRunProjectionProblem},
+            status.HTTP_401_UNAUTHORIZED: {"model": RuntimeRunProjectionProblem},
+            status.HTTP_403_FORBIDDEN: {"model": RuntimeRunProjectionProblem},
+            status.HTTP_404_NOT_FOUND: {"model": RuntimeRunProjectionProblem},
+            status.HTTP_413_CONTENT_TOO_LARGE: {
+                "model": RuntimeRunProjectionProblem
+            },
+            status.HTTP_422_UNPROCESSABLE_CONTENT: {
+                "model": RuntimeRunProjectionProblem
+            },
+            status.HTTP_503_SERVICE_UNAVAILABLE: {
+                "model": RuntimeRunProjectionProblem
+            },
+        }
+
+        @app.post(
+            _RUNTIME_RUN_PROJECTION_ROUTE,
+            response_model=RuntimeRunProjectionResponse,
+            response_model_by_alias=True,
+            openapi_extra={"x-required-scopes": ["runtime.run.observe"]},
+            responses=runtime_run_projection_responses,
+        )
+        def read_runtime_run_projection(
+            request: RuntimeRunProjectionRequest,
+            principal: Annotated[
+                InternalServicePrincipal,
+                Depends(_REQUIRE_RUNTIME_RUN_OBSERVE),
+            ],
+        ) -> RuntimeRunProjectionResponse:
+            del principal
+            return active_runtime_run_projection_service.read(request)
+
+    if runtime_settings.run_controller_enabled:
+        runtime_run_cancel_responses = {
+            status.HTTP_400_BAD_REQUEST: {"model": RuntimeRunCancelProblem},
+            status.HTTP_401_UNAUTHORIZED: {"model": RuntimeRunCancelProblem},
+            status.HTTP_403_FORBIDDEN: {"model": RuntimeRunCancelProblem},
+            status.HTTP_409_CONFLICT: {"model": RuntimeRunCancelProblem},
+            status.HTTP_413_CONTENT_TOO_LARGE: {"model": RuntimeRunCancelProblem},
+            status.HTTP_422_UNPROCESSABLE_CONTENT: {
+                "model": RuntimeRunCancelProblem
+            },
+            status.HTTP_503_SERVICE_UNAVAILABLE: {
+                "model": RuntimeRunCancelProblem
+            },
+        }
+
+        @app.post(
+            _RUNTIME_RUN_CANCEL_ROUTE,
+            response_model=RuntimeRunCancelResponse,
+            response_model_by_alias=True,
+            openapi_extra={"x-required-scopes": ["runtime.run.cancel"]},
+            responses=runtime_run_cancel_responses,
+        )
+        def request_runtime_run_cancel(
+            request: RuntimeRunCancelRequest,
+            principal: Annotated[
+                InternalServicePrincipal,
+                Depends(_REQUIRE_RUNTIME_RUN_CANCEL),
+            ],
+        ) -> RuntimeRunCancelResponse:
+            outcome = active_runtime_run_cancel_service.request_cancel(
+                request,
+                requested_by=principal.subject,
+            )
+            return RuntimeRunCancelResponse(outcome=outcome)
 
     if runtime_settings.deerflow_h0_enabled:
         if active_agent_harness is None:
@@ -671,18 +1557,8 @@ def create_app(
                 )
             except ValueError as exception:
                 return _runtime_problem(422, "RUNTIME_REQUEST_INVALID", str(exception))
-            except H0IdempotencyConflict:
-                return _runtime_problem(
-                    409,
-                    "RUNTIME_IDEMPOTENCY_CONFLICT",
-                    "The execution identity is already bound to another request.",
-                )
-            except RuntimeError:
-                return _runtime_problem(
-                    503,
-                    "RUNTIME_UNAVAILABLE",
-                    "The H0 runtime is temporarily unavailable.",
-                )
+            except RuntimeError as exception:
+                return _runtime_problem(409, "RUNTIME_IDEMPOTENCY_CONFLICT", str(exception))
             return ExecutionSnapshotResponse.from_snapshot(snapshot)
 
         @app.get(
@@ -924,6 +1800,66 @@ def _permit_authorization_problem(
     message: str,
 ) -> JSONResponse:
     body = PermitAuthorizationProblem(code=code, message=message)
+    return JSONResponse(
+        status_code=status_code,
+        content=body.model_dump(mode="json", by_alias=True),
+    )
+
+
+def _external_dispatch_arm_problem(
+    status_code: int,
+    code: str,
+    message: str,
+) -> JSONResponse:
+    body = ExternalDispatchArmProblem(code=code, message=message)
+    return JSONResponse(
+        status_code=status_code,
+        content=body.model_dump(mode="json", by_alias=True),
+    )
+
+
+def _external_operation_outcome_problem(
+    status_code: int,
+    code: str,
+    message: str,
+) -> JSONResponse:
+    body = ExternalOperationOutcomeProblem(code=code, message=message)
+    return JSONResponse(
+        status_code=status_code,
+        content=body.model_dump(mode="json", by_alias=True),
+    )
+
+
+def _runtime_run_cancel_problem(
+    status_code: int,
+    code: str,
+    message: str,
+) -> JSONResponse:
+    body = RuntimeRunCancelProblem(code=code, message=message)
+    return JSONResponse(
+        status_code=status_code,
+        content=body.model_dump(mode="json", by_alias=True),
+    )
+
+
+def _runtime_run_admission_problem(
+    status_code: int,
+    code: str,
+    message: str,
+) -> JSONResponse:
+    body = RuntimeRunAdmissionProblem(code=code, message=message)
+    return JSONResponse(
+        status_code=status_code,
+        content=body.model_dump(mode="json", by_alias=True),
+    )
+
+
+def _runtime_run_projection_problem(
+    status_code: int,
+    code: str,
+    message: str,
+) -> JSONResponse:
+    body = RuntimeRunProjectionProblem(code=code, message=message)
     return JSONResponse(
         status_code=status_code,
         content=body.model_dump(mode="json", by_alias=True),

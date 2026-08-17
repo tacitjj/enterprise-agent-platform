@@ -24,6 +24,12 @@
 3. 前端 API 模式失败时不得静默回退演示数据。
 4. 小节点只运行编译、契约和高风险规则的最小验证；完整跨端回归在阶段闭环后统一执行。
 
+Python Runtime 已实现一条默认关闭的受治理执行链：Supervisor 负责 Run 租约、
+fence、Permit、一次性 dispatch arm、权威结果收敛和 PostgreSQL checkpoint；
+governed H12 与 structured 3.0 worker 只有在角色、迁移、权限和内部 JWT 配置完整时
+才会装配。Worker 崩溃后可按更高 lease epoch 接管，但不能借接管绕过既有意图、
+Permit 或权威结果，也不能自动回退到旧模型/工具链路。
+
 ## 本地依赖
 
 - Java 21
@@ -91,7 +97,7 @@ API 模式失败时不会回退演示数据。员工端、企业管理中心与�
 
 ```bash
 cd dianlian-ai-runtime
-uv sync --dev
+uv sync --frozen --group deerflow-h0
 uv run uvicorn dianlian_runtime.app:create_app --factory --host 127.0.0.1 --port 8091
 ```
 
@@ -102,6 +108,15 @@ curl -s http://127.0.0.1:8091/internal/v1/health/liveness
 curl -s http://127.0.0.1:8091/internal/v1/health/readiness
 curl -s http://127.0.0.1:8091/internal/v1/runtime/status
 ```
+
+完整 Python 验证使用与 CI 相同的入口：
+
+```bash
+uv run python -m pytest
+```
+
+受治理 Worker、独立数据库角色和各项默认关闭能力的配置边界见
+[`dianlian-ai-runtime/README.md`](dianlian-ai-runtime/README.md)。
 
 ## 开源协作
 

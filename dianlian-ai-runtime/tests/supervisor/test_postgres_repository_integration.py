@@ -14,8 +14,13 @@ from dianlian_runtime.supervisor.authorizer import (
     create_postgres_permit_authorization_service,
 )
 from dianlian_runtime.supervisor.authorizer_contracts import (
+    ExternalDispatchArmRequest,
     PermitAuthorizationOutcome,
     PermitAuthorizationRequest,
+)
+from dianlian_runtime.supervisor.dispatch_authorizer import (
+    PostgresExternalDispatchArmService,
+    create_postgres_external_dispatch_arm_service,
 )
 from dianlian_runtime.supervisor.contracts import (
     AdmitRuntimeRunRequest,
@@ -62,9 +67,18 @@ DISPATCH_AUTHORIZER_TEST_DSN = os.getenv(
 RECONCILER_TEST_DSN = os.getenv(
     "DIANLIAN_TEST_SUPERVISOR_RECONCILER_DATABASE_DSN"
 )
+CONTROLLER_TEST_DSN = os.getenv(
+    "DIANLIAN_TEST_SUPERVISOR_CONTROLLER_DATABASE_DSN"
+)
+RUN_ADMITTER_TEST_DSN = os.getenv(
+    "DIANLIAN_TEST_SUPERVISOR_RUN_ADMITTER_DATABASE_DSN"
+)
 pytestmark = pytest.mark.skipif(
-    not TEST_DSN,
-    reason="DIANLIAN_TEST_SUPERVISOR_RUNTIME_DATABASE_DSN is not configured",
+    not TEST_DSN or not RUN_ADMITTER_TEST_DSN,
+    reason=(
+        "DIANLIAN_TEST_SUPERVISOR_RUNTIME_DATABASE_DSN and "
+        "DIANLIAN_TEST_SUPERVISOR_RUN_ADMITTER_DATABASE_DSN are required"
+    ),
 )
 
 
@@ -96,14 +110,27 @@ def _dispatch_authorizer_repository() -> PostgresRunSupervisorRepository:
     )
 
 
+def _controller_repository() -> PostgresRunSupervisorRepository:
+    assert CONTROLLER_TEST_DSN is not None
+    return PostgresRunSupervisorRepository(
+        lambda: psycopg.connect(CONTROLLER_TEST_DSN, row_factory=dict_row)
+    )
+
+
+def _run_admitter_repository() -> PostgresRunSupervisorRepository:
+    assert RUN_ADMITTER_TEST_DSN is not None
+    return PostgresRunSupervisorRepository(
+        lambda: psycopg.connect(RUN_ADMITTER_TEST_DSN, row_factory=dict_row)
+    )
+
+
 def _admit_queued_fixture(
-    repository: PostgresRunSupervisorRepository,
     *,
     runtime_version: str,
     agent_name: str,
 ):
     runtime_run_id = uuid4()
-    result = repository.admit(
+    result = _run_admitter_repository().admit(
         AdmitRuntimeRunRequest(
             tenant_id=uuid4(),
             runtime_thread_id=uuid4(),
@@ -136,7 +163,10 @@ def _admit_queued_fixture(
             admission_snapshot_hash="f" * 64,
             accepted_event_id=uuid4(),
             accepted_event_payload=FrozenJsonObject(
-                {"source": "candidate-integration"}
+                {
+                    "schemaVersion": "runtime-run-accepted-v2",
+                    "source": "candidate-integration",
+                }
             ),
         )
     )
@@ -147,6 +177,7 @@ def _admit_queued_fixture(
 
 def test_restricted_runtime_repository_commits_a_fenced_run_lifecycle() -> None:
     repository = _repository()
+    run_admitter_repository = _run_admitter_repository()
     tenant_id = uuid4()
     runtime_thread_id = uuid4()
     runtime_run_id = uuid4()
@@ -190,11 +221,16 @@ def test_restricted_runtime_repository_commits_a_fenced_run_lifecycle() -> None:
         admission_snapshot_id=uuid4(),
         admission_snapshot_hash="b" * 64,
         accepted_event_id=accepted_event_id,
-        accepted_event_payload=FrozenJsonObject({"source": "repository-test"}),
+        accepted_event_payload=FrozenJsonObject(
+            {
+                "schemaVersion": "runtime-run-accepted-v2",
+                "source": "repository-test",
+            }
+        ),
     )
 
-    admitted = repository.admit(admission)
-    replayed_admission = repository.admit(admission)
+    admitted = run_admitter_repository.admit(admission)
+    replayed_admission = run_admitter_repository.admit(admission)
     assert admitted == replayed_admission
     assert admitted.outcome == PrimitiveOutcome.FACT_RETURNED
     assert admitted.fact is not None
@@ -397,7 +433,6 @@ def test_restricted_runtime_repository_commits_a_fenced_run_lifecycle() -> None:
 def test_restricted_authorizer_is_ready_and_consumes_only_the_exact_issued_permit() -> None:
     runtime_repository = _repository()
     admitted = _admit_queued_fixture(
-        runtime_repository,
         runtime_version=f"permit-runtime-{uuid4()}",
         agent_name=f"permit-agent-{uuid4()}",
     )
@@ -476,6 +511,87 @@ def test_restricted_authorizer_is_ready_and_consumes_only_the_exact_issued_permi
 
 
 @pytest.mark.skipif(
+    not DISPATCH_AUTHORIZER_TEST_DSN,
+    reason=(
+        "DIANLIAN_TEST_SUPERVISOR_DISPATCH_AUTHORIZER_DATABASE_DSN is required"
+    ),
+)
+def test_restricted_dispatch_authorizer_service_arms_once_and_replay_denies_dispatch() -> None:
+    runtime_repository = _repository()
+    admitted = _admit_queued_fixture(
+        runtime_version=f"dispatch-service-runtime-{uuid4()}",
+        agent_name=f"dispatch-service-agent-{uuid4()}",
+    )
+    lease_owner = f"dispatch-service-worker-{uuid4()}"
+    claimed = runtime_repository.claim(
+        ClaimRuntimeRunRequest(
+            tenant_id=admitted.tenant_id,
+            runtime_run_id=admitted.runtime_run_id,
+            lease_owner=lease_owner,
+            lease_seconds=60,
+            started_event_id=uuid4(),
+            event_payload=FrozenJsonObject({"source": "dispatch-authorizer-service"}),
+        )
+    )
+    assert claimed.fact is not None
+    permit_id = uuid4()
+    intent_id = uuid4()
+    request_hash = "3" * 64
+    issued = runtime_repository.issue_external_permit(
+        IssueRuntimeExternalPermitRequest(
+            tenant_id=admitted.tenant_id,
+            runtime_run_id=admitted.runtime_run_id,
+            lease_owner=lease_owner,
+            lease_epoch=claimed.fact.lease_epoch,
+            runtime_external_permit_id=permit_id,
+            operation_kind=ExternalOperation.MODEL_INVOKE,
+            intent_id=intent_id,
+            request_hash=request_hash,
+            requested_ttl_seconds=30,
+            issue_event_id=uuid4(),
+        )
+    )
+    assert issued.fact is not None
+    request = ExternalDispatchArmRequest.model_validate(
+        {
+            "tenantId": str(admitted.tenant_id),
+            "runtimeExternalPermitId": str(permit_id),
+            "runtimeRunId": str(admitted.runtime_run_id),
+            "taskExecutionGeneration": admitted.task_execution_generation,
+            "leaseOwner": lease_owner,
+            "leaseEpoch": claimed.fact.lease_epoch,
+            "admissionSnapshotId": str(issued.fact.admission_snapshot_id),
+            "admissionSnapshotHash": issued.fact.admission_snapshot_hash,
+            "operationKind": "MODEL_INVOKE",
+            "intentId": str(intent_id),
+            "requestHash": request_hash,
+            "armEventId": str(uuid4()),
+        }
+    )
+    assert DISPATCH_AUTHORIZER_TEST_DSN is not None
+    authorizer = create_postgres_external_dispatch_arm_service(
+        DISPATCH_AUTHORIZER_TEST_DSN,
+        connect_timeout_seconds=5,
+        statement_timeout_seconds=5,
+        lock_timeout_seconds=5,
+    )
+
+    authorizer.start()
+
+    assert isinstance(authorizer, PostgresExternalDispatchArmService)
+    assert authorizer.ready is True
+    granted = authorizer.arm(request, armed_by="repository-integration-dispatch")
+    replayed = authorizer.arm(request, armed_by="repository-integration-dispatch")
+    assert granted.decision == ExternalDispatchArmDecision.GRANTED_NOW
+    assert granted.fact is not None
+    assert replayed.decision == ExternalDispatchArmDecision.DO_NOT_DISPATCH
+    assert replayed.fact is not None
+    assert authorizer.ready is True
+    authorizer.close()
+    assert authorizer.ready is False
+
+
+@pytest.mark.skipif(
     not DISPATCH_AUTHORIZER_TEST_DSN or not RECONCILER_TEST_DSN,
     reason=(
         "DIANLIAN_TEST_SUPERVISOR_DISPATCH_AUTHORIZER_DATABASE_DSN and "
@@ -487,7 +603,6 @@ def test_restricted_external_operation_channels_arm_record_reconcile_and_clear_b
     dispatch_authorizer_repository = _dispatch_authorizer_repository()
     reconciler_repository = _reconciler_repository()
     admitted = _admit_queued_fixture(
-        runtime_repository,
         runtime_version=f"outcome-runtime-{uuid4()}",
         agent_name=f"outcome-agent-{uuid4()}",
     )
@@ -686,10 +801,14 @@ def test_admission_and_dispatch_authorizer_capabilities_are_not_interchangeable(
         )
 
 
+@pytest.mark.skipif(
+    not CONTROLLER_TEST_DSN,
+    reason="DIANLIAN_TEST_SUPERVISOR_CONTROLLER_DATABASE_DSN is required",
+)
 def test_restricted_runtime_repository_separates_cancel_authority_states() -> None:
     repository = _repository()
+    controller_repository = _controller_repository()
     admitted = _admit_queued_fixture(
-        repository,
         runtime_version=f"cancel-authority-{uuid4()}",
         agent_name=f"cancel-authority-{uuid4()}",
     )
@@ -719,7 +838,7 @@ def test_restricted_runtime_repository_separates_cancel_authority_states() -> No
         AuthorizeRuntimeRunCancellationRequest(**fence)
     ).outcome == PrimitiveOutcome.NOT_APPLIED
 
-    cancel_requested = repository.request_cancel(
+    cancel_requested = controller_repository.request_cancel(
         RequestRuntimeRunCancelRequest(
             tenant_id=admitted.tenant_id,
             runtime_run_id=admitted.runtime_run_id,
@@ -779,8 +898,13 @@ def test_restricted_runtime_repository_separates_cancel_authority_states() -> No
     ).outcome == PrimitiveOutcome.NOT_APPLIED
 
 
+@pytest.mark.skipif(
+    not CONTROLLER_TEST_DSN,
+    reason="DIANLIAN_TEST_SUPERVISOR_CONTROLLER_DATABASE_DSN is required",
+)
 def test_restricted_candidate_discovery_is_fifo_compatible_and_claim_fenced() -> None:
     repository = _repository()
+    controller_repository = _controller_repository()
     compatibility = SelectNextRuntimeRunCandidateRequest(
         runtime_version=f"candidate-runtime-{uuid4()}",
         agent_name=f"candidate-agent-{uuid4()}",
@@ -792,11 +916,10 @@ def test_restricted_candidate_discovery_is_fifo_compatible_and_claim_fenced() ->
     assert empty.fact is None
 
     cancelled = _admit_queued_fixture(
-        repository,
         runtime_version=compatibility.runtime_version,
         agent_name=compatibility.agent_name,
     )
-    cancel_result = repository.request_cancel(
+    cancel_result = controller_repository.request_cancel(
         RequestRuntimeRunCancelRequest(
             tenant_id=cancelled.tenant_id,
             runtime_run_id=cancelled.runtime_run_id,
@@ -812,22 +935,18 @@ def test_restricted_candidate_discovery_is_fifo_compatible_and_claim_fenced() ->
     assert cancel_result.outcome == PrimitiveOutcome.FACT_RETURNED
 
     first_queued = _admit_queued_fixture(
-        repository,
         runtime_version=compatibility.runtime_version,
         agent_name=compatibility.agent_name,
     )
     second_queued = _admit_queued_fixture(
-        repository,
         runtime_version=compatibility.runtime_version,
         agent_name=compatibility.agent_name,
     )
     _admit_queued_fixture(
-        repository,
         runtime_version=f"incompatible-{uuid4()}",
         agent_name=compatibility.agent_name,
     )
     _admit_queued_fixture(
-        repository,
         runtime_version=compatibility.runtime_version,
         agent_name=f"incompatible-{uuid4()}",
     )

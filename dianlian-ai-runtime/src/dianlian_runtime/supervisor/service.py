@@ -3,30 +3,40 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from enum import StrEnum
+import logging
 import random
 from typing import Protocol, TypeVar, cast
 from uuid import UUID, uuid4
 
 from dianlian_runtime.supervisor.contracts import (
+    AuthorizeRuntimeRunCancellationRequest,
     AuthorizeRuntimeRunRequest,
+    BeginRuntimeRunCancellationRequest,
+    CancellationTerminalStatus,
     ClaimRuntimeRunRequest,
     CompleteRuntimeRunRequest,
     FailRuntimeRunRequest,
+    FinishRuntimeRunCancellationRequest,
     FrozenJsonObject,
     LoadRuntimeExecutionAuthorityRequest,
+    LoadRuntimeExternalOperationBarrierRequest,
     PrimitiveOutcome,
     PrimitiveResult,
     RecordRuntimeCheckpointRequest,
     RenewRuntimeRunLeaseRequest,
     RuntimeCheckpointFact,
+    RuntimeCancellationAuthorityFact,
     RuntimeExecutionAuthorityFact,
+    RuntimeExternalOperationBarrierFact,
     RuntimeRunCandidateFact,
     RuntimeRunFact,
+    require_supported_admission_contract_version,
     RuntimeStatus,
     SelectNextRuntimeRunCandidateRequest,
     SupervisorOutcomeUnknown,
     SupervisorRepositoryError,
     SupervisorUnavailable,
+    TakeoverRuntimeRunRequest,
 )
 from dianlian_runtime.supervisor.driver import (
     DriverCheckpointSink,
@@ -35,10 +45,14 @@ from dianlian_runtime.supervisor.driver import (
     DriverFence,
     DriverFenceGate,
     DriverFenceRevoked,
+    LocalQuiesceDisposition,
     LocalQuiesceResult,
     PersistedDriverCheckpoint,
     RunExecutionDriver,
 )
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class RunSupervisor(Protocol):
@@ -71,6 +85,11 @@ class RunSupervisorWorkerRepository(Protocol):
         request: ClaimRuntimeRunRequest,
     ) -> PrimitiveResult[RuntimeRunFact]: ...
 
+    def takeover(
+        self,
+        request: TakeoverRuntimeRunRequest,
+    ) -> PrimitiveResult[RuntimeRunFact]: ...
+
     def load_execution_authority(
         self,
         request: LoadRuntimeExecutionAuthorityRequest,
@@ -84,6 +103,26 @@ class RunSupervisorWorkerRepository(Protocol):
     def authorize(
         self,
         request: AuthorizeRuntimeRunRequest,
+    ) -> PrimitiveResult[RuntimeRunFact]: ...
+
+    def authorize_cancellation(
+        self,
+        request: AuthorizeRuntimeRunCancellationRequest,
+    ) -> PrimitiveResult[RuntimeCancellationAuthorityFact]: ...
+
+    def begin_cancellation(
+        self,
+        request: BeginRuntimeRunCancellationRequest,
+    ) -> PrimitiveResult[RuntimeRunFact]: ...
+
+    def load_external_operation_barrier(
+        self,
+        request: LoadRuntimeExternalOperationBarrierRequest,
+    ) -> PrimitiveResult[RuntimeExternalOperationBarrierFact]: ...
+
+    def finish_cancellation(
+        self,
+        request: FinishRuntimeRunCancellationRequest,
     ) -> PrimitiveResult[RuntimeRunFact]: ...
 
     def record_checkpoint(
@@ -104,6 +143,7 @@ class RunSupervisorWorkerRepository(Protocol):
 
 class _RunOutcome(StrEnum):
     TERMINAL_COMMITTED = "TERMINAL_COMMITTED"
+    CONVERGENCE_PENDING = "CONVERGENCE_PENDING"
     STOPPED = "STOPPED"
     FATAL = "FATAL"
 
@@ -122,7 +162,7 @@ Jitter = Callable[[float], float]
 
 
 class DormantRunSupervisorWorker:
-    """Single-Run S0 worker; deliberately absent from production composition."""
+    """Single-Run S0 worker, composed only by an explicit governed opt-in."""
 
     def __init__(
         self,
@@ -143,8 +183,9 @@ class DormantRunSupervisorWorker:
             raise ValueError("runtime_version is outside its allowed range")
         if not agent_name.strip() or len(agent_name) > 128:
             raise ValueError("agent_name is outside its allowed range")
-        if admission_contract_version != "2.2":
-            raise ValueError("admission_contract_version must be 2.2")
+        require_supported_admission_contract_version(
+            admission_contract_version
+        )
         if isinstance(lease_seconds, bool) or not 5 <= lease_seconds <= 3600:
             raise ValueError("lease_seconds is outside its allowed range")
         if drain_timeout_seconds <= 0:
@@ -356,10 +397,41 @@ class DormantRunSupervisorWorker:
                     self._enter_fatal(exception)
                     return
                 if claimed.outcome == PrimitiveOutcome.NOT_APPLIED:
-                    if await self._sleep_until_stopped(self._jitter(empty_backoff)):
+                    takeover_request = TakeoverRuntimeRunRequest(
+                        fact.tenant_id,
+                        fact.runtime_run_id,
+                        self._require_worker_id(),
+                        self._lease_seconds,
+                        self._uuid_factory(),
+                        FrozenJsonObject(
+                            {
+                                "schemaVersion": "runtime-supervisor-takeover-v1",
+                                "workerId": self._require_worker_id(),
+                            }
+                        ),
+                    )
+                    try:
+                        claimed = await self._call_repository(
+                            self._repository.takeover,
+                            takeover_request,
+                        )
+                    except SupervisorOutcomeUnknown as exception:
+                        # The lease may already have moved. Stop and let its bounded
+                        # expiry make the exact Run eligible for a later takeover.
+                        self._enter_fatal(exception)
                         return
-                    empty_backoff = min(empty_backoff * 2, 2.0)
-                    continue
+                    except BaseException as exception:
+                        if isinstance(exception, asyncio.CancelledError):
+                            raise
+                        self._enter_fatal(exception)
+                        return
+                    if claimed.outcome == PrimitiveOutcome.NOT_APPLIED:
+                        if await self._sleep_until_stopped(
+                            self._jitter(empty_backoff)
+                        ):
+                            return
+                        empty_backoff = min(empty_backoff * 2, 2.0)
+                        continue
                 claimed_fact = claimed.fact
                 if claimed_fact is None:
                     self._enter_fatal(RuntimeError("claimed Run fact is missing"))
@@ -374,7 +446,24 @@ class DormantRunSupervisorWorker:
                     self._enter_fatal(RuntimeError("Run execution driver lost readiness"))
                     return
 
-                outcome = await self._run_claimed(claimed_fact)
+                convergence_backoff = 0.5
+                if claimed_fact.status in (
+                    RuntimeStatus.CANCEL_REQUESTED,
+                    RuntimeStatus.CANCELLING,
+                ):
+                    outcome = await self._cancel_claimed(claimed_fact)
+                else:
+                    outcome = await self._run_claimed(claimed_fact)
+                while outcome == _RunOutcome.CONVERGENCE_PENDING:
+                    if await self._sleep_until_stopped(
+                        self._jitter(convergence_backoff)
+                    ):
+                        return
+                    convergence_backoff = min(
+                        convergence_backoff * 2,
+                        min(5.0, self._lease_seconds / 3.0),
+                    )
+                    outcome = await self._run_claimed(claimed_fact)
                 if outcome != _RunOutcome.TERMINAL_COMMITTED:
                     if outcome == _RunOutcome.FATAL and self._state != SupervisorWorkerState.FATAL:
                         self._enter_fatal(RuntimeError("claimed Run lost its safe fence"))
@@ -448,7 +537,14 @@ class DormantRunSupervisorWorker:
                     await _await_cancelled(driver_task)
                     return _RunOutcome.FATAL
                 if heartbeat_outcome == _HeartbeatOutcome.CANCEL_REQUESTED:
-                    await self._stop_driver_locally(fence, driver_task)
+                    quiesced = await self._stop_driver_locally(fence, driver_task)
+                    cancellation = await self._renew(fence)
+                    if quiesced is None or cancellation is None:
+                        return _RunOutcome.FATAL
+                    return await self._cancel_claimed(
+                        cancellation,
+                        local_quiesce=quiesced,
+                    )
                 else:
                     driver_task.cancel()
                     await _await_cancelled(driver_task)
@@ -460,9 +556,11 @@ class DormantRunSupervisorWorker:
                 gate.revoke()
                 if isinstance(exception, asyncio.CancelledError):
                     raise
+                _log_driver_failure(exception)
                 return _RunOutcome.FATAL
-            except BaseException:
+            except BaseException as exception:
                 gate.revoke()
+                _log_driver_failure(exception)
                 return _RunOutcome.FATAL
 
             heartbeat_stop.set()
@@ -474,7 +572,14 @@ class DormantRunSupervisorWorker:
             if heartbeat_outcome != _HeartbeatOutcome.STOPPED:
                 gate.revoke()
                 if heartbeat_outcome == _HeartbeatOutcome.CANCEL_REQUESTED:
-                    await self._driver.quiesce_locally(fence)
+                    quiesced = await self._driver.quiesce_locally(fence)
+                    cancellation = await self._renew(fence)
+                    if cancellation is None:
+                        return _RunOutcome.FATAL
+                    return await self._cancel_claimed(
+                        cancellation,
+                        local_quiesce=quiesced,
+                    )
                 return _RunOutcome.FATAL
 
             if driver_result.disposition == DriverExecutionDisposition.FENCED:
@@ -489,11 +594,20 @@ class DormantRunSupervisorWorker:
                 RuntimeStatus.CANCELLING,
             ):
                 gate.revoke()
-                await self._driver.quiesce_locally(fence)
-                return _RunOutcome.FATAL
+                quiesced = await self._driver.quiesce_locally(fence)
+                return await self._cancel_claimed(
+                    final_renew,
+                    local_quiesce=quiesced,
+                )
             if final_renew.status != RuntimeStatus.RUNNING:
                 gate.revoke()
                 return _RunOutcome.FATAL
+            if (
+                driver_result.disposition
+                == DriverExecutionDisposition.CONVERGENCE_PENDING
+            ):
+                gate.revoke()
+                return _RunOutcome.CONVERGENCE_PENDING
 
             terminal_event_id = self._uuid_factory()
             try:
@@ -583,6 +697,159 @@ class DormantRunSupervisorWorker:
                 await _await_cancelled(heartbeat_task)
             self._active_driver_task = None
             self._active_gate = None
+
+    async def _cancel_claimed(
+        self,
+        run: RuntimeRunFact,
+        *,
+        local_quiesce: LocalQuiesceResult | None = None,
+    ) -> _RunOutcome:
+        if run.status not in (
+            RuntimeStatus.CANCEL_REQUESTED,
+            RuntimeStatus.CANCELLING,
+        ):
+            return _RunOutcome.FATAL
+        if (
+            local_quiesce is not None
+            and local_quiesce.disposition != LocalQuiesceDisposition.QUIESCED
+        ):
+            return _RunOutcome.FATAL
+
+        current = run
+        try:
+            if current.status == RuntimeStatus.CANCEL_REQUESTED:
+                begin = await self._call_repository(
+                    self._repository.begin_cancellation,
+                    BeginRuntimeRunCancellationRequest(
+                        current.tenant_id,
+                        current.runtime_run_id,
+                        cast(str, current.lease_owner),
+                        current.lease_epoch,
+                        self._uuid_factory(),
+                        FrozenJsonObject(
+                            {
+                                "schemaVersion": "runtime-supervisor-cancellation-start-v1",
+                                "workerId": self._require_worker_id(),
+                            }
+                        ),
+                    ),
+                )
+                if begin.outcome != PrimitiveOutcome.FACT_RETURNED or begin.fact is None:
+                    return _RunOutcome.FATAL
+                current = begin.fact
+            if (
+                current.status != RuntimeStatus.CANCELLING
+                or current.lease_owner != self._require_worker_id()
+                or current.lease_epoch != run.lease_epoch
+            ):
+                return _RunOutcome.FATAL
+
+            authority = await self._call_repository(
+                self._repository.authorize_cancellation,
+                AuthorizeRuntimeRunCancellationRequest(
+                    current.tenant_id,
+                    current.runtime_run_id,
+                    self._require_worker_id(),
+                    current.lease_epoch,
+                ),
+            )
+            if authority.outcome != PrimitiveOutcome.FACT_RETURNED or authority.fact is None:
+                return _RunOutcome.FATAL
+            cancellation_authority = authority.fact
+            if (
+                cancellation_authority.tenant_id != current.tenant_id
+                or cancellation_authority.runtime_run_id != current.runtime_run_id
+                or cancellation_authority.task_execution_generation
+                != current.task_execution_generation
+                or cancellation_authority.lease_owner != self._require_worker_id()
+                or cancellation_authority.lease_epoch != current.lease_epoch
+            ):
+                return _RunOutcome.FATAL
+
+            barrier_result = await self._call_repository(
+                self._repository.load_external_operation_barrier,
+                LoadRuntimeExternalOperationBarrierRequest(
+                    current.tenant_id,
+                    current.runtime_run_id,
+                    current.task_execution_generation,
+                    self._require_worker_id(),
+                    current.lease_epoch,
+                ),
+            )
+            if (
+                barrier_result.outcome != PrimitiveOutcome.FACT_RETURNED
+                or barrier_result.fact is None
+            ):
+                return _RunOutcome.FATAL
+            barrier = barrier_result.fact
+            if (
+                barrier.tenant_id != current.tenant_id
+                or barrier.runtime_run_id != current.runtime_run_id
+                or barrier.task_execution_generation
+                != current.task_execution_generation
+                or barrier.lease_owner != self._require_worker_id()
+                or barrier.lease_epoch != current.lease_epoch
+            ):
+                return _RunOutcome.FATAL
+
+            terminal_status = (
+                CancellationTerminalStatus.CANCEL_OUTCOME_UNKNOWN
+                if barrier.blocking
+                else CancellationTerminalStatus.CANCELLED
+            )
+            terminal_reason = (
+                "CANCEL_EXTERNAL_OUTCOME_UNKNOWN"
+                if barrier.blocking
+                else "CANCELLED_BY_REQUEST"
+            )
+            terminal_event_id = self._uuid_factory()
+            finished = await self._call_repository(
+                self._repository.finish_cancellation,
+                FinishRuntimeRunCancellationRequest(
+                    current.tenant_id,
+                    current.runtime_run_id,
+                    self._require_worker_id(),
+                    current.lease_epoch,
+                    terminal_status,
+                    terminal_event_id,
+                    terminal_reason,
+                    FrozenJsonObject(
+                        {
+                            "schemaVersion": "runtime-supervisor-cancellation-v1",
+                            "localQuiesce": (
+                                local_quiesce.disposition.value
+                                if local_quiesce is not None
+                                else LocalQuiesceDisposition.QUIESCED.value
+                            ),
+                            "dispatchArmedCount": barrier.dispatch_armed_count,
+                            "outcomeUnknownCount": barrier.outcome_unknown_count,
+                        }
+                    ),
+                ),
+            )
+        except asyncio.CancelledError:
+            raise
+        except BaseException:
+            return _RunOutcome.FATAL
+
+        expected_status = RuntimeStatus(terminal_status.value)
+        terminal = finished.fact
+        if (
+            finished.outcome != PrimitiveOutcome.FACT_RETURNED
+            or terminal is None
+            or terminal.tenant_id != current.tenant_id
+            or terminal.runtime_run_id != current.runtime_run_id
+            or terminal.status != expected_status
+            or terminal.terminal_event_id != terminal_event_id
+            or terminal.terminal_reason != terminal_reason
+            or terminal.failure_code is not None
+            or terminal.lease_owner is not None
+            or terminal.lease_until is not None
+            or terminal.heartbeat_at is not None
+            or terminal.terminal_at is None
+        ):
+            return _RunOutcome.FATAL
+        return _RunOutcome.TERMINAL_COMMITTED
 
     async def _heartbeat(
         self,
@@ -832,7 +1099,11 @@ class DormantRunSupervisorWorker:
         if (
             run.tenant_id != candidate.tenant_id
             or run.runtime_run_id != candidate.runtime_run_id
-            or run.status != RuntimeStatus.RUNNING
+            or run.status not in (
+                RuntimeStatus.RUNNING,
+                RuntimeStatus.CANCEL_REQUESTED,
+                RuntimeStatus.CANCELLING,
+            )
             or run.lease_owner != self._require_worker_id()
             or run.lease_epoch < 1
             or run.runtime_version != self._runtime_version
@@ -852,6 +1123,17 @@ class DormantRunSupervisorWorker:
         self._stop_event.set()
         if self._active_gate is not None:
             self._active_gate.revoke()
+
+
+def _log_driver_failure(exception: BaseException) -> None:
+    """仅记录异常类型，避免把模型请求、内部 URL 或凭据写入日志。"""
+
+    cause = exception.__cause__
+    LOGGER.error(
+        "Run execution driver failed: exception_type=%s cause_type=%s",
+        type(exception).__name__,
+        type(cause).__name__ if cause is not None else "NONE",
+    )
 
 
 class _RepositoryDriverGate(DriverFenceGate):

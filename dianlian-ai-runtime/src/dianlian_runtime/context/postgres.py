@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from hashlib import sha256
 import json
 import logging
 from time import perf_counter
@@ -202,6 +201,7 @@ class PostgresContextService:
         selected = self._select_evidence(
             knowledge_rows,
             memory_rows,
+            contract_version=request.contract_version,
             max_evidence=request.policy.max_evidence,
             max_context_tokens=request.policy.max_context_tokens,
         )
@@ -400,6 +400,8 @@ class PostgresContextService:
                    chunk.title,
                    chunk.content,
                    chunk.citation,
+                   chunk.index_profile,
+                   chunk.chunk_ordinal,
                    LEAST(
                        1.0,
                        CASE
@@ -472,6 +474,8 @@ class PostgresContextService:
                    chunk.title,
                    chunk.content,
                    chunk.citation,
+                   chunk.index_profile,
+                   chunk.chunk_ordinal,
                    LEAST(
                        1.0,
                        CASE
@@ -525,7 +529,11 @@ class PostgresContextService:
         ).fetchall()
 
     @staticmethod
-    def _to_evidence(source: RequestedSource, row: dict) -> ContextEvidence:
+    def _to_evidence(
+        source: RequestedSource,
+        row: dict,
+        contract_version: str,
+    ) -> ContextEvidence:
         excerpt = row["content"]
         return ContextEvidence(
             evidenceId=f"lexical:{row['chunk_id']}",
@@ -538,6 +546,14 @@ class PostgresContextService:
             contentHash=sha256(excerpt.encode("utf-8")).hexdigest(),
             score=float(row["score"]),
             citation=row["citation"],
+            projectionLocator=(
+                {
+                    "indexProfile": row["index_profile"],
+                    "chunkOrdinal": row["chunk_ordinal"],
+                }
+                if contract_version != "1.0"
+                else None
+            ),
         )
 
     def _select_evidence(
@@ -545,14 +561,21 @@ class PostgresContextService:
         knowledge_rows: list[dict],
         memory_rows: list[dict],
         *,
+        contract_version: str,
         max_evidence: int,
         max_context_tokens: int,
     ) -> list[tuple[RequestedSource, ContextEvidence]]:
         candidates = [
-            (RequestedSource.KNOWLEDGE, self._to_evidence(RequestedSource.KNOWLEDGE, row))
+            (
+                RequestedSource.KNOWLEDGE,
+                self._to_evidence(RequestedSource.KNOWLEDGE, row, contract_version),
+            )
             for row in knowledge_rows
         ] + [
-            (RequestedSource.MEMORY, self._to_evidence(RequestedSource.MEMORY, row))
+            (
+                RequestedSource.MEMORY,
+                self._to_evidence(RequestedSource.MEMORY, row, contract_version),
+            )
             for row in memory_rows
         ]
         candidates.sort(key=lambda item: (-item[1].score, item[1].chunk_id))

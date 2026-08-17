@@ -25,6 +25,9 @@ from dianlian_runtime.harness.h12_gateway import (
     ADMISSION_RESOLVE_SCOPE,
     ScopedRuntimeServiceJwtIssuer,
 )
+from dianlian_runtime.harness.structured_admission_manifest import (
+    JavaCapabilityStructuredAdmissionManifest,
+)
 from dianlian_runtime.supervisor.contracts import (
     ExternalOperation,
     ExternalPermitStatus,
@@ -79,7 +82,7 @@ class JavaAdmissionManifestResolveRequest(_AdmissionManifestWireContract):
     tenant_id: NonNilUuid
     task_step_id: NonNilUuid
     execution_generation: int = Field(ge=1)
-    admission_contract_version: Literal["2.2"] = "2.2"
+    admission_contract_version: Literal["2.2", "3.0"] = "2.2"
     admission_snapshot_id: NonNilUuid
     admission_snapshot_hash: LowerSha256
     runtime_external_permit_id: NonNilUuid
@@ -210,7 +213,7 @@ class AdmissionManifestOutcomeUnknown(AdmissionManifestFailure):
 
 
 class JavaAdmissionManifestClient:
-    """Dormant, non-caching reader; production composition is intentionally absent."""
+    """Non-caching reader, composed only by an explicit governed-worker opt-in."""
 
     def __init__(
         self,
@@ -236,7 +239,7 @@ class JavaAdmissionManifestClient:
         permit: RuntimeExternalPermitFact,
         *,
         gate: DriverFenceGate,
-    ) -> JavaAdmissionManifest:
+    ) -> JavaAdmissionManifest | JavaCapabilityStructuredAdmissionManifest:
         wire_request = _bind_request(execution, permit)
         payload = wire_request.model_dump(mode="json", by_alias=True)
         _assert_no_forbidden_manifest_keys(payload)
@@ -314,10 +317,12 @@ class JavaAdmissionManifestClient:
                 object_pairs_hook=_reject_duplicate_keys,
             )
             _assert_no_forbidden_manifest_keys(raw_response)
-            manifest = JavaAdmissionManifest.model_validate_json(
-                response_content,
-                strict=True,
+            manifest_type = (
+                JavaAdmissionManifest
+                if execution.authority.admission_contract_version == "2.2"
+                else JavaCapabilityStructuredAdmissionManifest
             )
+            manifest = manifest_type.model_validate_json(response_content, strict=True)
         except (TypeError, ValueError) as exception:
             raise AdmissionManifestOutcomeUnknown(
                 "ADMISSION_MANIFEST_RESPONSE_INVALID"
@@ -369,7 +374,6 @@ def _bind_request(
         and permit.admission_contract_version
         == authority.admission_contract_version
         == fence.admission_contract_version
-        == "2.2"
         and permit.admission_snapshot_id
         == authority.admission_snapshot_id
         == fence.admission_snapshot_id
@@ -399,6 +403,7 @@ def _bind_request(
             tenant_id=authority.tenant_id,
             task_step_id=authority.task_step_id,
             execution_generation=authority.task_execution_generation,
+            admission_contract_version=authority.admission_contract_version,
             admission_snapshot_id=authority.admission_snapshot_id,
             admission_snapshot_hash=authority.admission_snapshot_hash,
             runtime_external_permit_id=permit.runtime_external_permit_id,
@@ -415,7 +420,7 @@ def _bind_request(
 
 def _require_exact_manifest_binding(
     execution: DriverExecutionRequest,
-    manifest: JavaAdmissionManifest,
+    manifest: JavaAdmissionManifest | JavaCapabilityStructuredAdmissionManifest,
 ) -> None:
     authority = execution.authority
     if (

@@ -32,6 +32,12 @@ class InternalServiceScope(StrEnum):
     CONTEXT_RETRIEVE = "context.retrieve"
     AGENT_RUNTIME_EXECUTE = "agent.runtime.execute"
     RUNTIME_EXTERNAL_PERMIT_AUTHORIZE = "runtime.external-permit.authorize"
+    RUNTIME_EXTERNAL_DISPATCH_ARM = "runtime.external-dispatch.arm"
+    RUNTIME_EXTERNAL_OUTCOME_RECORD = "runtime.external-outcome.record"
+    RUNTIME_EXTERNAL_OUTCOME_RECONCILE = "runtime.external-outcome.reconcile"
+    RUNTIME_RUN_ADMIT = "runtime.run.admit"
+    RUNTIME_RUN_OBSERVE = "runtime.run.observe"
+    RUNTIME_RUN_CANCEL = "runtime.run.cancel"
 
 
 class InternalServiceAuthError(RuntimeError):

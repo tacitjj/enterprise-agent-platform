@@ -14,7 +14,33 @@ _HASH_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _CODE_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
 _MAX_INTEGER = 2**31 - 1
 _MAX_BIGINT = 2**63 - 1
-_SUPPORTED_ADMISSION_CONTRACT_VERSION = "2.2"
+SUPPORTED_ADMISSION_CONTRACT_VERSIONS = frozenset({"2.2", "3.0"})
+_H12_STATE_SCHEMA_VERSION = "governed-h12-state-v1"
+_H12_STATE_KEYS = frozenset(
+    {
+        "schemaVersion",
+        "stateVersion",
+        "tenantId",
+        "runtimeRunId",
+        "taskExecutionGeneration",
+        "initialModel",
+        "tool",
+        "afterToolModel",
+    }
+)
+_MAX_H12_STATE_BYTES = 1024 * 1024
+_STRUCTURED_STATE_SCHEMA_VERSION = "structured-model-driver-state-v1"
+_STRUCTURED_STATE_KEYS = frozenset(
+    {
+        "schemaVersion",
+        "stateVersion",
+        "tenantId",
+        "runtimeRunId",
+        "taskExecutionGeneration",
+        "admissionManifest",
+        "receipts",
+    }
+)
 
 
 class RuntimeStatus(StrEnum):
@@ -43,6 +69,13 @@ class MultitaskStrategy(StrEnum):
     REJECT = "REJECT"
     SAFE_QUEUE = "SAFE_QUEUE"
     INTERRUPT = "INTERRUPT"
+
+
+class RuntimeSourceKind(StrEnum):
+    """Supervisor Run 的业务来源类型。"""
+
+    CONVERSATION = "CONVERSATION"
+    TASK_STEP = "TASK_STEP"
 
 
 class ProgressEventType(StrEnum):
@@ -120,6 +153,14 @@ class SupervisorPrimitive(StrEnum):
     )
     LOAD_EXTERNAL_OPERATION_BARRIER = (
         "load_runtime_external_operation_barrier"
+    )
+    LOAD_H12_CHECKPOINT = "load_runtime_h12_checkpoint"
+    SAVE_H12_CHECKPOINT = "save_runtime_h12_checkpoint"
+    CHECK_H12_CHECKPOINT_CAPABILITY = "check_runtime_h12_checkpoint_capability"
+    LOAD_STRUCTURED_CHECKPOINT = "load_runtime_structured_checkpoint"
+    SAVE_STRUCTURED_CHECKPOINT = "save_runtime_structured_checkpoint"
+    CHECK_STRUCTURED_CHECKPOINT_CAPABILITY = (
+        "check_runtime_structured_checkpoint_capability"
     )
 
 
@@ -308,11 +349,15 @@ def _require_hash(name: str, value: object) -> None:
         raise ValueError(f"{name} must be a lowercase SHA-256 hex digest")
 
 
-def _require_admission_contract_version(value: object) -> None:
+def require_supported_admission_contract_version(value: object) -> None:
+    """仅接受已经完成账本兼容设计的 Admission 契约版本。"""
+
     if not isinstance(value, str):
         raise TypeError("admission_contract_version must be a string")
-    if value != _SUPPORTED_ADMISSION_CONTRACT_VERSION:
-        raise ValueError("admission_contract_version must be 2.2")
+    if value not in SUPPORTED_ADMISSION_CONTRACT_VERSIONS:
+        raise ValueError(
+            "admission_contract_version must be one of 2.2, 3.0"
+        )
 
 
 def _require_code(name: str, value: object) -> None:
@@ -347,7 +392,9 @@ class SelectNextRuntimeRunCandidateRequest:
     def __post_init__(self) -> None:
         _require_text("runtime_version", self.runtime_version, maximum=128)
         _require_text("agent_name", self.agent_name, maximum=128)
-        _require_admission_contract_version(self.admission_contract_version)
+        require_supported_admission_contract_version(
+            self.admission_contract_version
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -358,7 +405,7 @@ class AdmitRuntimeRunRequest:
     task_step_id: UUID
     agent_instance_id: UUID
     user_id: UUID
-    conversation_id: UUID
+    conversation_id: UUID | None
     source_message_id: UUID | None
     runtime_thread_revision: int
     runtime_type: str
@@ -383,6 +430,7 @@ class AdmitRuntimeRunRequest:
     admission_snapshot_hash: str
     accepted_event_id: UUID
     accepted_event_payload: FrozenJsonObject
+    source_kind: RuntimeSourceKind = RuntimeSourceKind.CONVERSATION
 
     def __post_init__(self) -> None:
         for name in (
@@ -392,7 +440,6 @@ class AdmitRuntimeRunRequest:
             "task_step_id",
             "agent_instance_id",
             "user_id",
-            "conversation_id",
             "capability_version_id",
             "prompt_version_id",
             "model_policy_id",
@@ -402,6 +449,7 @@ class AdmitRuntimeRunRequest:
             "accepted_event_id",
         ):
             _require_uuid(name, getattr(self, name))
+        _require_uuid("conversation_id", self.conversation_id, optional=True)
         _require_uuid("source_message_id", self.source_message_id, optional=True)
         _require_uuid(
             "predecessor_runtime_run_id",
@@ -437,7 +485,24 @@ class AdmitRuntimeRunRequest:
             )
         _require_text("runtime_version", self.runtime_version, maximum=128)
         _require_text("agent_name", self.agent_name, maximum=128)
-        _require_admission_contract_version(self.admission_contract_version)
+        require_supported_admission_contract_version(
+            self.admission_contract_version
+        )
+        if not isinstance(self.source_kind, RuntimeSourceKind):
+            raise TypeError("source_kind must be a RuntimeSourceKind")
+        if self.admission_contract_version == "2.2":
+            if (
+                self.source_kind != RuntimeSourceKind.CONVERSATION
+                or self.conversation_id is None
+            ):
+                raise ValueError("2.2 admission requires a conversation source")
+        elif (
+            self.source_kind != RuntimeSourceKind.TASK_STEP
+            or self.conversation_id is not None
+            or self.source_message_id is not None
+            or self.runtime_thread_revision != self.task_execution_generation
+        ):
+            raise ValueError("3.0 admission requires an exact task-step source")
         _require_hash("admission_snapshot_hash", self.admission_snapshot_hash)
         if not isinstance(self.accepted_event_payload, FrozenJsonObject):
             raise TypeError("accepted_event_payload must be a FrozenJsonObject")
@@ -745,6 +810,166 @@ class LoadRuntimeExternalOperationBarrierRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class LoadRuntimeH12CheckpointRequest:
+    tenant_id: UUID
+    runtime_run_id: UUID
+    task_execution_generation: int
+    lease_owner: str
+    lease_epoch: int
+
+    def __post_init__(self) -> None:
+        _validate_fence(
+            self.tenant_id,
+            self.runtime_run_id,
+            self.lease_owner,
+            self.lease_epoch,
+        )
+        _require_positive(
+            "task_execution_generation",
+            self.task_execution_generation,
+            maximum=_MAX_BIGINT,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class SaveRuntimeH12CheckpointRequest:
+    tenant_id: UUID
+    runtime_run_id: UUID
+    task_execution_generation: int
+    lease_owner: str
+    lease_epoch: int
+    expected_checkpoint_id: str | None
+    expected_state_version: int
+    event_id: UUID
+    checkpoint_id: str
+    transition_code: str
+    state: FrozenJsonObject
+
+    def __post_init__(self) -> None:
+        _validate_fence(
+            self.tenant_id,
+            self.runtime_run_id,
+            self.lease_owner,
+            self.lease_epoch,
+        )
+        _require_positive(
+            "task_execution_generation",
+            self.task_execution_generation,
+            maximum=_MAX_BIGINT,
+        )
+        _require_non_negative(
+            "expected_state_version",
+            self.expected_state_version,
+            maximum=_MAX_BIGINT - 1,
+        )
+        if self.expected_state_version == 0:
+            if self.expected_checkpoint_id is not None:
+                raise ValueError(
+                    "expected_checkpoint_id must be null for the initial checkpoint"
+                )
+        else:
+            _require_text(
+                "expected_checkpoint_id",
+                self.expected_checkpoint_id,
+                maximum=160,
+            )
+        _require_uuid("event_id", self.event_id)
+        _require_text("checkpoint_id", self.checkpoint_id, maximum=160)
+        if self.checkpoint_id == self.expected_checkpoint_id:
+            raise ValueError("checkpoint_id must advance the checkpoint chain")
+        _require_code("transition_code", self.transition_code)
+        _validate_runtime_h12_state_document(
+            self.state,
+            tenant_id=self.tenant_id,
+            runtime_run_id=self.runtime_run_id,
+            task_execution_generation=self.task_execution_generation,
+            state_version=self.expected_state_version + 1,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class LoadRuntimeStructuredCheckpointRequest:
+    """读取当前 3.0 Run 的结构化 Driver checkpoint。"""
+
+    tenant_id: UUID
+    runtime_run_id: UUID
+    task_execution_generation: int
+    lease_owner: str
+    lease_epoch: int
+
+    def __post_init__(self) -> None:
+        _validate_fence(
+            self.tenant_id,
+            self.runtime_run_id,
+            self.lease_owner,
+            self.lease_epoch,
+        )
+        _require_positive(
+            "task_execution_generation",
+            self.task_execution_generation,
+            maximum=_MAX_BIGINT,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class SaveRuntimeStructuredCheckpointRequest:
+    """以当前 Run fence 对结构化 Driver 状态执行一次 CAS append。"""
+
+    tenant_id: UUID
+    runtime_run_id: UUID
+    task_execution_generation: int
+    lease_owner: str
+    lease_epoch: int
+    expected_checkpoint_id: str | None
+    expected_state_version: int
+    event_id: UUID
+    checkpoint_id: str
+    transition_code: str
+    state: FrozenJsonObject
+
+    def __post_init__(self) -> None:
+        _validate_fence(
+            self.tenant_id,
+            self.runtime_run_id,
+            self.lease_owner,
+            self.lease_epoch,
+        )
+        _require_positive(
+            "task_execution_generation",
+            self.task_execution_generation,
+            maximum=_MAX_BIGINT,
+        )
+        _require_non_negative(
+            "expected_state_version",
+            self.expected_state_version,
+            maximum=_MAX_BIGINT - 1,
+        )
+        if self.expected_state_version == 0:
+            if self.expected_checkpoint_id is not None:
+                raise ValueError(
+                    "expected_checkpoint_id must be null for the initial checkpoint"
+                )
+        else:
+            _require_text(
+                "expected_checkpoint_id",
+                self.expected_checkpoint_id,
+                maximum=160,
+            )
+        _require_uuid("event_id", self.event_id)
+        _require_text("checkpoint_id", self.checkpoint_id, maximum=160)
+        if self.checkpoint_id == self.expected_checkpoint_id:
+            raise ValueError("checkpoint_id must advance the checkpoint chain")
+        _require_code("transition_code", self.transition_code)
+        _validate_runtime_structured_state_document(
+            self.state,
+            tenant_id=self.tenant_id,
+            runtime_run_id=self.runtime_run_id,
+            task_execution_generation=self.task_execution_generation,
+            state_version=self.expected_state_version + 1,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class AppendRuntimeRunEventRequest:
     tenant_id: UUID
     runtime_run_id: UUID
@@ -977,6 +1202,76 @@ def _require_json_object(name: str, value: object) -> None:
         raise TypeError(f"{name} must be a FrozenJsonObject")
 
 
+def _validate_runtime_h12_state_document(
+    state: object,
+    *,
+    tenant_id: UUID,
+    runtime_run_id: UUID,
+    task_execution_generation: int,
+    state_version: int,
+) -> None:
+    _require_json_object("state", state)
+    assert isinstance(state, FrozenJsonObject)
+    if len(state.canonical.encode("utf-8")) > _MAX_H12_STATE_BYTES:
+        raise ValueError("state exceeds the H12 checkpoint size limit")
+    document = state.value
+    if frozenset(document) != _H12_STATE_KEYS:
+        raise ValueError("state must contain the exact governed H12 top-level keys")
+    if document["schemaVersion"] != _H12_STATE_SCHEMA_VERSION:
+        raise ValueError("state schemaVersion is unsupported")
+    if document["tenantId"] != str(tenant_id):
+        raise ValueError("state tenantId does not match the checkpoint identity")
+    if document["runtimeRunId"] != str(runtime_run_id):
+        raise ValueError("state runtimeRunId does not match the checkpoint identity")
+    if document["taskExecutionGeneration"] != task_execution_generation:
+        raise ValueError(
+            "state taskExecutionGeneration does not match the checkpoint identity"
+        )
+    if document["stateVersion"] != state_version:
+        raise ValueError("state stateVersion does not match the checkpoint version")
+    for name in ("initialModel", "tool", "afterToolModel"):
+        value = document[name]
+        if value is not None and not isinstance(value, Mapping):
+            raise ValueError(f"state {name} must be an object or null")
+
+
+def _validate_runtime_structured_state_document(
+    state: object,
+    *,
+    tenant_id: UUID,
+    runtime_run_id: UUID,
+    task_execution_generation: int,
+    state_version: int,
+) -> None:
+    """校验共享账本中独立的 3.0 Driver 状态信封。"""
+
+    _require_json_object("state", state)
+    assert isinstance(state, FrozenJsonObject)
+    if len(state.canonical.encode("utf-8")) > _MAX_H12_STATE_BYTES:
+        raise ValueError("state exceeds the structured checkpoint size limit")
+    document = state.value
+    if frozenset(document) != _STRUCTURED_STATE_KEYS:
+        raise ValueError("state must contain the exact structured top-level keys")
+    if document["schemaVersion"] != _STRUCTURED_STATE_SCHEMA_VERSION:
+        raise ValueError("state schemaVersion is unsupported")
+    if document["tenantId"] != str(tenant_id):
+        raise ValueError("state tenantId does not match the checkpoint identity")
+    if document["runtimeRunId"] != str(runtime_run_id):
+        raise ValueError("state runtimeRunId does not match the checkpoint identity")
+    if document["taskExecutionGeneration"] != task_execution_generation:
+        raise ValueError(
+            "state taskExecutionGeneration does not match the checkpoint identity"
+        )
+    if document["stateVersion"] != state_version:
+        raise ValueError("state stateVersion does not match the checkpoint version")
+    if not isinstance(document["admissionManifest"], Mapping):
+        raise ValueError("state admissionManifest must be an object")
+    if not isinstance(document["receipts"], Sequence) or isinstance(
+        document["receipts"], (str, bytes, bytearray)
+    ):
+        raise ValueError("state receipts must be an array")
+
+
 def _validate_fenced_event(request: object) -> None:
     _validate_fence(
         getattr(request, "tenant_id"),
@@ -1039,7 +1334,7 @@ class RuntimeExecutionAuthorityFact:
     task_execution_generation: int
     agent_instance_id: UUID
     user_id: UUID
-    conversation_id: UUID
+    conversation_id: UUID | None
     source_message_id: UUID | None
     runtime_thread_revision: int
     runtime_type: str
@@ -1061,6 +1356,7 @@ class RuntimeExecutionAuthorityFact:
     admission_contract_version: str
     admission_snapshot_id: UUID
     admission_snapshot_hash: str
+    source_kind: RuntimeSourceKind = RuntimeSourceKind.CONVERSATION
 
     def __post_init__(self) -> None:
         for name in (
@@ -1071,7 +1367,6 @@ class RuntimeExecutionAuthorityFact:
             "task_step_id",
             "agent_instance_id",
             "user_id",
-            "conversation_id",
             "capability_version_id",
             "prompt_version_id",
             "model_policy_id",
@@ -1079,6 +1374,7 @@ class RuntimeExecutionAuthorityFact:
             "admission_snapshot_id",
         ):
             _require_uuid(name, getattr(self, name))
+        _require_uuid("conversation_id", self.conversation_id, optional=True)
         _require_uuid("source_message_id", self.source_message_id, optional=True)
         _require_uuid(
             "predecessor_runtime_run_id",
@@ -1114,7 +1410,24 @@ class RuntimeExecutionAuthorityFact:
             )
         _require_text("lease_owner", self.lease_owner, maximum=160)
         _require_positive("lease_epoch", self.lease_epoch, maximum=_MAX_BIGINT)
-        _require_admission_contract_version(self.admission_contract_version)
+        require_supported_admission_contract_version(
+            self.admission_contract_version
+        )
+        if not isinstance(self.source_kind, RuntimeSourceKind):
+            raise TypeError("source_kind must be a RuntimeSourceKind")
+        if self.admission_contract_version == "2.2":
+            if (
+                self.source_kind != RuntimeSourceKind.CONVERSATION
+                or self.conversation_id is None
+            ):
+                raise ValueError("2.2 authority requires a conversation source")
+        elif (
+            self.source_kind != RuntimeSourceKind.TASK_STEP
+            or self.conversation_id is not None
+            or self.source_message_id is not None
+            or self.runtime_thread_revision != self.task_execution_generation
+        ):
+            raise ValueError("3.0 authority requires an exact task-step source")
         _require_hash("admission_snapshot_hash", self.admission_snapshot_hash)
         if (
             self.operation_kind == OperationKind.START
@@ -1175,7 +1488,9 @@ class RuntimeExternalPermitFact:
             self.task_execution_generation,
             maximum=_MAX_BIGINT,
         )
-        _require_admission_contract_version(self.admission_contract_version)
+        require_supported_admission_contract_version(
+            self.admission_contract_version
+        )
         _require_hash("admission_snapshot_hash", self.admission_snapshot_hash)
         if not isinstance(self.operation_kind, ExternalOperation):
             raise TypeError("operation_kind must be an ExternalOperation")
@@ -1379,6 +1694,108 @@ class RuntimeExternalOperationBarrierFact:
             _require_utc_datetime("oldest_blocking_at", self.oldest_blocking_at)
         elif self.oldest_blocking_at is not None:
             raise ValueError("oldest_blocking_at must be null when not blocking")
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeH12CheckpointFact:
+    tenant_id: UUID
+    runtime_run_id: UUID
+    task_execution_generation: int
+    checkpoint_id: str
+    previous_checkpoint_id: str | None
+    state_version: int
+    state: FrozenJsonObject
+    state_hash: str
+    transition_code: str
+    event_id: UUID
+    created_by: str
+    lease_epoch: int
+    created_at: datetime
+
+    def __post_init__(self) -> None:
+        _validate_run_key(self.tenant_id, self.runtime_run_id)
+        _require_positive(
+            "task_execution_generation",
+            self.task_execution_generation,
+            maximum=_MAX_BIGINT,
+        )
+        _require_text("checkpoint_id", self.checkpoint_id, maximum=160)
+        if self.previous_checkpoint_id is not None:
+            _require_text(
+                "previous_checkpoint_id",
+                self.previous_checkpoint_id,
+                maximum=160,
+            )
+        _require_positive("state_version", self.state_version, maximum=_MAX_BIGINT)
+        if (self.state_version == 1) is (self.previous_checkpoint_id is not None):
+            raise ValueError(
+                "previous_checkpoint_id must be null only for the first state version"
+            )
+        _validate_runtime_h12_state_document(
+            self.state,
+            tenant_id=self.tenant_id,
+            runtime_run_id=self.runtime_run_id,
+            task_execution_generation=self.task_execution_generation,
+            state_version=self.state_version,
+        )
+        _require_hash("state_hash", self.state_hash)
+        _require_code("transition_code", self.transition_code)
+        _require_uuid("event_id", self.event_id)
+        _require_text("created_by", self.created_by, maximum=160)
+        _require_positive("lease_epoch", self.lease_epoch, maximum=_MAX_BIGINT)
+        _require_utc_datetime("created_at", self.created_at)
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeStructuredCheckpointFact:
+    """结构化 Driver 在共享 append-only checkpoint 账本中的事实。"""
+
+    tenant_id: UUID
+    runtime_run_id: UUID
+    task_execution_generation: int
+    checkpoint_id: str
+    previous_checkpoint_id: str | None
+    state_version: int
+    state: FrozenJsonObject
+    state_hash: str
+    transition_code: str
+    event_id: UUID
+    created_by: str
+    lease_epoch: int
+    created_at: datetime
+
+    def __post_init__(self) -> None:
+        _validate_run_key(self.tenant_id, self.runtime_run_id)
+        _require_positive(
+            "task_execution_generation",
+            self.task_execution_generation,
+            maximum=_MAX_BIGINT,
+        )
+        _require_text("checkpoint_id", self.checkpoint_id, maximum=160)
+        if self.previous_checkpoint_id is not None:
+            _require_text(
+                "previous_checkpoint_id",
+                self.previous_checkpoint_id,
+                maximum=160,
+            )
+        _require_positive("state_version", self.state_version, maximum=_MAX_BIGINT)
+        if (self.state_version == 1) is (self.previous_checkpoint_id is not None):
+            raise ValueError(
+                "previous_checkpoint_id must be null only for the first state version"
+            )
+        _validate_runtime_structured_state_document(
+            self.state,
+            tenant_id=self.tenant_id,
+            runtime_run_id=self.runtime_run_id,
+            task_execution_generation=self.task_execution_generation,
+            state_version=self.state_version,
+        )
+        _require_hash("state_hash", self.state_hash)
+        _require_code("transition_code", self.transition_code)
+        _require_uuid("event_id", self.event_id)
+        _require_text("created_by", self.created_by, maximum=160)
+        _require_positive("lease_epoch", self.lease_epoch, maximum=_MAX_BIGINT)
+        _require_utc_datetime("created_at", self.created_at)
 
 
 @dataclass(frozen=True, slots=True)

@@ -87,7 +87,7 @@ def _retrieval_request(
     resource_version: str,
 ) -> dict:
     return {
-        "contractVersion": "1.0",
+        "contractVersion": "1.1",
         "requestId": str(uuid4()),
         "traceId": str(uuid4()),
         "deadlineAt": "2099-01-01T00:00:00Z",
@@ -166,7 +166,7 @@ def _memory_retrieval_request(
     scope_id: str,
 ) -> dict:
     return {
-        "contractVersion": "1.0",
+        "contractVersion": "1.1",
         "requestId": str(uuid4()),
         "traceId": str(uuid4()),
         "deadlineAt": "2099-01-01T00:00:00Z",
@@ -231,6 +231,10 @@ def test_real_postgres_exact_allowlist_and_delete_fence() -> None:
             assert retrieval.json()["retrievalTrace"]["strategies"] == ["LEXICAL"]
             assert retrieval.json()["knowledge"]["evidence"][0]["sourceId"] == source_id
             assert retrieval.json()["knowledge"]["evidence"][0]["sourceVersion"] == source_version
+            assert retrieval.json()["knowledge"]["evidence"][0]["projectionLocator"] == {
+                "indexProfile": "context-default-v1",
+                "chunkOrdinal": 0,
+            }
 
             wrong_resource = _retrieval_request(
                 tenant_id=tenant_id,
@@ -314,6 +318,10 @@ def test_real_postgres_group_memory_requires_source_sequence() -> None:
             assert visible.status_code == 200
             assert visible.json()["memory"]["evidence"][0]["sourceId"] == resource_id
             assert visible.json()["memory"]["evidence"][0]["sourceVersion"] == "1"
+            assert visible.json()["memory"]["evidence"][0]["projectionLocator"] == {
+                "indexProfile": "context-default-v1",
+                "chunkOrdinal": 0,
+            }
     finally:
         with psycopg.connect(TEST_DSN) as connection:
             connection.execute(

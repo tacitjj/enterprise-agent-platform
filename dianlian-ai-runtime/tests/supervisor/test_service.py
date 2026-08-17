@@ -16,7 +16,9 @@ from dianlian_runtime.supervisor.contracts import (
     OperationKind,
     PrimitiveOutcome,
     PrimitiveResult,
+    RuntimeCancellationAuthorityFact,
     RuntimeExecutionAuthorityFact,
+    RuntimeExternalOperationBarrierFact,
     RuntimeRunCandidateFact,
     RuntimeRunFact,
     RuntimeStatus,
@@ -48,6 +50,9 @@ STEP_ID = UUID("10000000-0000-4000-8000-000000000004")
 FIXED_UUID = UUID("10000000-0000-4000-8000-000000000005")
 CLAIM_EVENT_ID = UUID("10000000-0000-4000-8000-000000000006")
 TERMINAL_EVENT_ID = UUID("10000000-0000-4000-8000-000000000007")
+CANCEL_BEGIN_EVENT_ID = UUID("10000000-0000-4000-8000-000000000013")
+CANCEL_FINISH_EVENT_ID = UUID("10000000-0000-4000-8000-000000000014")
+TAKEOVER_EVENT_ID = UUID("10000000-0000-4000-8000-000000000012")
 TASK_ID = UUID("10000000-0000-4000-8000-000000000008")
 AGENT_INSTANCE_ID = UUID("10000000-0000-4000-8000-000000000009")
 USER_ID = UUID("10000000-0000-4000-8000-00000000000a")
@@ -64,6 +69,7 @@ NOW = datetime(2026, 8, 13, tzinfo=timezone.utc)
 def _execution_authority_fact(
     *,
     lease_owner: str = f"dianlian-agent-worker:{FIXED_UUID}",
+    lease_epoch: int = 1,
 ) -> RuntimeExecutionAuthorityFact:
     return RuntimeExecutionAuthorityFact(
         tenant_id=TENANT_ID,
@@ -93,7 +99,7 @@ def _execution_authority_fact(
         agent_name="agent-v1",
         admission_contract_version="2.2",
         lease_owner=lease_owner,
-        lease_epoch=1,
+        lease_epoch=lease_epoch,
         admission_snapshot_id=ADMISSION_SNAPSHOT_ID,
         admission_snapshot_hash="b" * 64,
     )
@@ -144,7 +150,9 @@ def test_driver_contracts_are_frozen_and_reject_weak_identities() -> None:
             authority="not-an-authority",
             fence=fence,
         )
-    with pytest.raises(ValueError, match="admission_contract_version must be 2.2"):
+    structured_fence = replace(fence, admission_contract_version="3.0")
+    assert structured_fence.admission_contract_version == "3.0"
+    with pytest.raises(ValueError, match="must be one of 2.2, 3.0"):
         replace(fence, admission_contract_version="2.1")
     for mismatched_fence in (
         replace(fence, task_execution_generation=2),
@@ -173,13 +181,20 @@ def test_driver_results_cannot_forge_terminal_or_cancellation_facts() -> None:
     assert completed.failure_code is None
     assert failed.failure_code == "DRIVER_FAILED"
     assert quiesced.disposition == LocalQuiesceDisposition.QUIESCED
-    with pytest.raises(ValueError, match="fenced execution cannot include terminal facts"):
-        DriverExecutionResult(
-            DriverExecutionDisposition.FENCED,
-            "RUN_FAILED",
-            None,
-            FrozenJsonObject({}),
-        )
+    for disposition in (
+        DriverExecutionDisposition.CONVERGENCE_PENDING,
+        DriverExecutionDisposition.FENCED,
+    ):
+        with pytest.raises(
+            ValueError,
+            match="nonterminal execution cannot include terminal facts",
+        ):
+            DriverExecutionResult(
+                disposition,
+                "RUN_FAILED",
+                None,
+                FrozenJsonObject({}),
+            )
     assert not hasattr(quiesced, "terminal_reason")
     assert not hasattr(quiesced, "event_payload")
 
@@ -188,6 +203,7 @@ def _run_fact(
     *,
     status: RuntimeStatus = RuntimeStatus.RUNNING,
     lease_owner: str = f"dianlian-agent-worker:{FIXED_UUID}",
+    lease_epoch: int = 1,
 ) -> RuntimeRunFact:
     return RuntimeRunFact(
         tenant_id=TENANT_ID,
@@ -211,7 +227,7 @@ def _run_fact(
         terminal_event_id=None,
         lease_owner=lease_owner,
         lease_until=NOW + timedelta(seconds=30),
-        lease_epoch=1,
+        lease_epoch=lease_epoch,
         heartbeat_at=NOW,
         attempt=1,
         runtime_version="runtime-v1",
@@ -225,10 +241,51 @@ def _run_fact(
     )
 
 
+def _cancellation_authority_fact(
+    *,
+    lease_owner: str = f"dianlian-agent-worker:{FIXED_UUID}",
+    lease_epoch: int = 1,
+) -> RuntimeCancellationAuthorityFact:
+    return RuntimeCancellationAuthorityFact(
+        tenant_id=TENANT_ID,
+        runtime_run_id=RUN_ID,
+        runtime_thread_id=THREAD_ID,
+        task_step_id=STEP_ID,
+        task_execution_generation=1,
+        status=RuntimeStatus.CANCELLING,
+        lease_owner=lease_owner,
+        lease_epoch=lease_epoch,
+        run_version=4,
+        cancel_requested_at=NOW,
+    )
+
+
+def _external_operation_barrier_fact(
+    *,
+    lease_owner: str = f"dianlian-agent-worker:{FIXED_UUID}",
+    lease_epoch: int = 1,
+    dispatch_armed_count: int = 0,
+    outcome_unknown_count: int = 0,
+) -> RuntimeExternalOperationBarrierFact:
+    blocking = dispatch_armed_count + outcome_unknown_count > 0
+    return RuntimeExternalOperationBarrierFact(
+        tenant_id=TENANT_ID,
+        runtime_run_id=RUN_ID,
+        task_execution_generation=1,
+        lease_owner=lease_owner,
+        lease_epoch=lease_epoch,
+        dispatch_armed_count=dispatch_armed_count,
+        outcome_unknown_count=outcome_unknown_count,
+        blocking=blocking,
+        oldest_blocking_at=NOW if blocking else None,
+    )
+
+
 class FakeRepository:
     def __init__(self) -> None:
         self.candidate_results: list[Any] = []
         self.claim_results: list[Any] = []
+        self.takeover_results: list[Any] = []
         self.execution_authority_results: list[Any] = [
             PrimitiveResult(
                 PrimitiveOutcome.FACT_RETURNED,
@@ -237,6 +294,10 @@ class FakeRepository:
         ]
         self.renew_results: list[Any] = []
         self.authorize_results: list[Any] = []
+        self.cancellation_authority_results: list[Any] = []
+        self.begin_cancellation_results: list[Any] = []
+        self.barrier_results: list[Any] = []
+        self.finish_cancellation_results: list[Any] = []
         self.complete_results: list[Any] = []
         self.fail_results: list[Any] = []
         self.checkpoint_results: list[Any] = []
@@ -266,6 +327,9 @@ class FakeRepository:
     def claim(self, request: object) -> Any:
         return self._next("claim", request, self.claim_results)
 
+    def takeover(self, request: object) -> Any:
+        return self._next("takeover", request, self.takeover_results)
+
     def load_execution_authority(self, request: object) -> Any:
         return self._next(
             "load_execution_authority",
@@ -278,6 +342,30 @@ class FakeRepository:
 
     def authorize(self, request: object) -> Any:
         return self._next("authorize", request, self.authorize_results)
+
+    def authorize_cancellation(self, request: object) -> Any:
+        return self._next(
+            "authorize_cancellation",
+            request,
+            self.cancellation_authority_results,
+        )
+
+    def begin_cancellation(self, request: object) -> Any:
+        return self._next(
+            "begin_cancellation",
+            request,
+            self.begin_cancellation_results,
+        )
+
+    def load_external_operation_barrier(self, request: object) -> Any:
+        return self._next("barrier", request, self.barrier_results)
+
+    def finish_cancellation(self, request: object) -> Any:
+        return self._next(
+            "finish_cancellation",
+            request,
+            self.finish_cancellation_results,
+        )
 
     def record_checkpoint(self, request: object) -> Any:
         return self._next("checkpoint", request, self.checkpoint_results)
@@ -303,6 +391,7 @@ class FakeDriver:
             None,
             FrozenJsonObject({"result": "ok"}),
         )
+        self.results: list[DriverExecutionResult] = []
         self.release_execute = asyncio.Event()
         self.authorize_twice = False
         self.checkpoint: PersistedDriverCheckpoint | None = None
@@ -339,7 +428,7 @@ class FakeDriver:
         await self.release_execute.wait()
         if self.execute_exception is not None:
             raise self.execute_exception
-        return self.result
+        return self.results.pop(0) if self.results else self.result
 
     async def quiesce_locally(self, fence: object) -> LocalQuiesceResult:
         del fence
@@ -364,7 +453,12 @@ def _uuid_sequence(*values: UUID) -> Any:
     return lambda: next(remaining)
 
 
-def _worker(repository: FakeRepository, driver: FakeDriver) -> DormantRunSupervisorWorker:
+def _worker(
+    repository: FakeRepository,
+    driver: FakeDriver,
+    *,
+    jitter: Any | None = None,
+) -> DormantRunSupervisorWorker:
     return DormantRunSupervisorWorker(
         repository,  # type: ignore[arg-type]
         driver,  # type: ignore[arg-type]
@@ -375,7 +469,7 @@ def _worker(repository: FakeRepository, driver: FakeDriver) -> DormantRunSupervi
         sleep=asyncio.sleep,
         offload=_immediate_offload,
         uuid_factory=_uuid_sequence(FIXED_UUID, CLAIM_EVENT_ID, TERMINAL_EVENT_ID),
-        jitter=lambda _: 0.001,
+        jitter=jitter or (lambda _: 0.001),
     )
 
 
@@ -410,8 +504,17 @@ def test_empty_candidate_probe_controls_readiness_and_close_is_idempotent() -> N
     asyncio.run(verify())
 
 
-def test_worker_rejects_non_22_admission_contract() -> None:
-    with pytest.raises(ValueError, match="admission_contract_version must be 2.2"):
+def test_worker_accepts_only_explicitly_supported_admission_contracts() -> None:
+    structured = DormantRunSupervisorWorker(
+        FakeRepository(),  # type: ignore[arg-type]
+        FakeDriver(),  # type: ignore[arg-type]
+        runtime_version="runtime-v1",
+        agent_name="structured-agent-v1",
+        admission_contract_version="3.0",
+    )
+    assert structured.state == SupervisorWorkerState.STOPPED
+
+    with pytest.raises(ValueError, match="must be one of 2.2, 3.0"):
         DormantRunSupervisorWorker(
             FakeRepository(),  # type: ignore[arg-type]
             FakeDriver(),  # type: ignore[arg-type]
@@ -449,6 +552,75 @@ def test_claim_outcome_unknown_fails_stopped_before_driver_and_next_poll() -> No
         assert [name for name, _ in repository.calls] == ["candidate", "claim"]
         claim_request = repository.calls[1][1]
         assert getattr(claim_request, "started_event_id") == CLAIM_EVENT_ID
+        await worker.close()
+
+    asyncio.run(verify())
+
+
+def test_expired_running_candidate_is_taken_over_before_driver_execution() -> None:
+    async def verify() -> None:
+        repository = FakeRepository()
+        repository.candidate_results.append(
+            PrimitiveResult(
+                PrimitiveOutcome.FACT_RETURNED,
+                RuntimeRunCandidateFact(TENANT_ID, RUN_ID),
+            )
+        )
+        repository.claim_results.append(
+            PrimitiveResult(PrimitiveOutcome.NOT_APPLIED, None)
+        )
+        taken_over = _run_fact(lease_epoch=2)
+        repository.takeover_results.append(
+            PrimitiveResult(PrimitiveOutcome.FACT_RETURNED, taken_over)
+        )
+        repository.execution_authority_results[:] = [
+            PrimitiveResult(
+                PrimitiveOutcome.FACT_RETURNED,
+                _execution_authority_fact(lease_epoch=2),
+            )
+        ]
+        driver = FakeDriver()
+        driver.result = DriverExecutionResult(
+            DriverExecutionDisposition.FENCED,
+            None,
+            None,
+            FrozenJsonObject({}),
+        )
+        driver.release_execute.set()
+        worker = DormantRunSupervisorWorker(
+            repository,  # type: ignore[arg-type]
+            driver,  # type: ignore[arg-type]
+            runtime_version="runtime-v1",
+            agent_name="agent-v1",
+            admission_contract_version="2.2",
+            lease_seconds=30,
+            sleep=asyncio.sleep,
+            offload=_immediate_offload,
+            uuid_factory=_uuid_sequence(
+                FIXED_UUID,
+                CLAIM_EVENT_ID,
+                TAKEOVER_EVENT_ID,
+            ),
+            jitter=lambda _: 0.001,
+        )
+
+        await worker.start()
+        await _wait_until(lambda: worker.state == SupervisorWorkerState.FATAL)
+
+        assert [name for name, _ in repository.calls] == [
+            "candidate",
+            "claim",
+            "takeover",
+            "load_execution_authority",
+        ]
+        takeover_request = repository.calls[2][1]
+        assert getattr(takeover_request, "takeover_event_id") == TAKEOVER_EVENT_ID
+        assert getattr(takeover_request, "new_lease_owner") == worker.worker_id
+        assert getattr(takeover_request, "event_payload").to_builtin() == {
+            "schemaVersion": "runtime-supervisor-takeover-v1",
+            "workerId": worker.worker_id,
+        }
+        assert driver.execution_requests[0].fence.lease_epoch == 2
         await worker.close()
 
     asyncio.run(verify())
@@ -533,6 +705,89 @@ def test_completed_driver_result_is_committed_only_after_final_renew() -> None:
         assert load_request.lease_owner == f"dianlian-agent-worker:{FIXED_UUID}"
         assert load_request.lease_epoch == 1
         assert driver.quiesce_count == 0
+
+    asyncio.run(verify())
+
+
+def test_convergence_pending_reenters_the_same_run_without_fatal_worker_state() -> None:
+    async def verify() -> None:
+        repository = FakeRepository()
+        repository.candidate_results.extend(
+            [
+                PrimitiveResult(
+                    PrimitiveOutcome.FACT_RETURNED,
+                    RuntimeRunCandidateFact(TENANT_ID, RUN_ID),
+                ),
+                PrimitiveResult(PrimitiveOutcome.NOT_APPLIED, None),
+            ]
+        )
+        run = _run_fact()
+        repository.claim_results.append(
+            PrimitiveResult(PrimitiveOutcome.FACT_RETURNED, run)
+        )
+        repository.execution_authority_results[:] = [
+            PrimitiveResult(
+                PrimitiveOutcome.FACT_RETURNED,
+                _execution_authority_fact(),
+            ),
+            PrimitiveResult(
+                PrimitiveOutcome.FACT_RETURNED,
+                _execution_authority_fact(),
+            ),
+        ]
+        repository.renew_results.extend(
+            [
+                PrimitiveResult(PrimitiveOutcome.FACT_RETURNED, run),
+                PrimitiveResult(PrimitiveOutcome.FACT_RETURNED, run),
+            ]
+        )
+        repository.complete_results.append(
+            PrimitiveResult(
+                PrimitiveOutcome.FACT_RETURNED,
+                replace(
+                    run,
+                    status=RuntimeStatus.COMPLETED,
+                    terminal_reason="RUN_FINISHED",
+                    terminal_event_id=TERMINAL_EVENT_ID,
+                    terminal_at=NOW,
+                    lease_owner=None,
+                    lease_until=None,
+                    heartbeat_at=None,
+                ),
+            )
+        )
+        driver = FakeDriver()
+        driver.results.extend(
+            [
+                DriverExecutionResult(
+                    DriverExecutionDisposition.CONVERGENCE_PENDING,
+                    None,
+                    None,
+                    FrozenJsonObject({"action": "QUERY_EXACT_JAVA"}),
+                ),
+                driver.result,
+            ]
+        )
+        driver.release_execute.set()
+        worker = _worker(repository, driver, jitter=lambda _: 0.0)
+
+        await worker.start()
+        await _wait_until(
+            lambda: any(name == "complete" for name, _ in repository.calls)
+        )
+
+        assert worker.state == SupervisorWorkerState.RUNNING
+        assert driver.execute_count == 2
+        assert [name for name, _ in repository.calls][:7] == [
+            "candidate",
+            "claim",
+            "load_execution_authority",
+            "renew",
+            "load_execution_authority",
+            "renew",
+            "complete",
+        ]
+        await worker.close()
 
     asyncio.run(verify())
 
@@ -794,7 +1049,7 @@ def test_terminal_not_applied_does_not_extend_lease_or_fallback() -> None:
     asyncio.run(verify())
 
 
-def test_cancel_request_from_renew_only_quiesces_locally_and_writes_no_cancel_fact() -> None:
+def test_cancel_request_quiesces_and_finishes_with_durable_barrier_evidence() -> None:
     async def verify() -> None:
         repository = FakeRepository()
         repository.candidate_results.append(
@@ -807,15 +1062,54 @@ def test_cancel_request_from_renew_only_quiesces_locally_and_writes_no_cancel_fa
         repository.claim_results.append(
             PrimitiveResult(PrimitiveOutcome.FACT_RETURNED, run)
         )
-        repository.renew_results.append(
+        cancel_requested = replace(
+            run,
+            status=RuntimeStatus.CANCEL_REQUESTED,
+            cancel_requested_at=NOW,
+        )
+        repository.renew_results.extend(
+            [
+                PrimitiveResult(PrimitiveOutcome.FACT_RETURNED, cancel_requested),
+                PrimitiveResult(PrimitiveOutcome.FACT_RETURNED, cancel_requested),
+            ]
+        )
+        cancelling = replace(
+            cancel_requested,
+            status=RuntimeStatus.CANCELLING,
+            run_version=4,
+        )
+        repository.begin_cancellation_results.append(
+            PrimitiveResult(PrimitiveOutcome.FACT_RETURNED, cancelling)
+        )
+        repository.cancellation_authority_results.append(
+            PrimitiveResult(
+                PrimitiveOutcome.FACT_RETURNED,
+                _cancellation_authority_fact(),
+            )
+        )
+        repository.barrier_results.append(
+            PrimitiveResult(
+                PrimitiveOutcome.FACT_RETURNED,
+                _external_operation_barrier_fact(dispatch_armed_count=1),
+            )
+        )
+        repository.finish_cancellation_results.append(
             PrimitiveResult(
                 PrimitiveOutcome.FACT_RETURNED,
                 replace(
-                    run,
-                    status=RuntimeStatus.CANCEL_REQUESTED,
-                    cancel_requested_at=NOW,
+                    cancelling,
+                    status=RuntimeStatus.CANCEL_OUTCOME_UNKNOWN,
+                    terminal_reason="CANCEL_EXTERNAL_OUTCOME_UNKNOWN",
+                    terminal_event_id=CANCEL_FINISH_EVENT_ID,
+                    terminal_at=NOW,
+                    lease_owner=None,
+                    lease_until=None,
+                    heartbeat_at=None,
                 ),
             )
+        )
+        repository.candidate_results.append(
+            PrimitiveResult(PrimitiveOutcome.NOT_APPLIED, None)
         )
         driver = FakeDriver()
 
@@ -831,12 +1125,20 @@ def test_cancel_request_from_renew_only_quiesces_locally_and_writes_no_cancel_fa
             lease_seconds=5,
             sleep=immediate_sleep,
             offload=_immediate_offload,
-            uuid_factory=_uuid_sequence(FIXED_UUID, CLAIM_EVENT_ID),
+            uuid_factory=_uuid_sequence(
+                FIXED_UUID,
+                CLAIM_EVENT_ID,
+                CANCEL_BEGIN_EVENT_ID,
+                CANCEL_FINISH_EVENT_ID,
+            ),
             jitter=lambda _: 0.0,
         )
 
         await worker.start()
-        await _wait_until(lambda: worker.state == SupervisorWorkerState.FATAL)
+        await _wait_until(
+            lambda: sum(name == "candidate" for name, _ in repository.calls) == 2
+        )
+        await worker.close()
 
         assert driver.quiesce_count == 1
         assert [name for name, _ in repository.calls] == [
@@ -844,8 +1146,25 @@ def test_cancel_request_from_renew_only_quiesces_locally_and_writes_no_cancel_fa
             "claim",
             "load_execution_authority",
             "renew",
+            "renew",
+            "begin_cancellation",
+            "authorize_cancellation",
+            "barrier",
+            "finish_cancellation",
+            "candidate",
         ]
-        await worker.close()
+        begin_request = repository.calls[5][1]
+        assert getattr(begin_request, "event_id") == CANCEL_BEGIN_EVENT_ID
+        finish_request = repository.calls[8][1]
+        assert getattr(finish_request, "terminal_status").value == (
+            "CANCEL_OUTCOME_UNKNOWN"
+        )
+        assert getattr(finish_request, "event_payload").to_builtin() == {
+            "schemaVersion": "runtime-supervisor-cancellation-v1",
+            "localQuiesce": "QUIESCED",
+            "dispatchArmedCount": 1,
+            "outcomeUnknownCount": 0,
+        }
 
     asyncio.run(verify())
 

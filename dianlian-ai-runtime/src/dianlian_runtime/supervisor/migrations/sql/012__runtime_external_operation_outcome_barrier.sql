@@ -124,7 +124,7 @@ BEGIN
            AND NOT attribute.attisdropped
     LOOP
         EXECUTE pg_catalog.format(
-            'REVOKE ALL PRIVILEGES (%I) ON TABLE %I.%I FROM dianlian_supervisor_executor, dianlian_supervisor_permit_authorizer, dianlian_supervisor_dispatch_authorizer, dianlian_supervisor_outcome_reconciler',
+            'REVOKE ALL PRIVILEGES (%I) ON TABLE %I.%I FROM PUBLIC, dianlian_supervisor_executor, dianlian_supervisor_permit_authorizer, dianlian_supervisor_dispatch_authorizer, dianlian_supervisor_outcome_reconciler',
             v_column.attname,
             v_column.nspname,
             v_column.relname
