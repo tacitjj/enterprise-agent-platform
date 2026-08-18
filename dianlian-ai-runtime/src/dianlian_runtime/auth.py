@@ -28,6 +28,8 @@ _MAX_PUBLIC_KEY_FILE_SIZE = 65_536
 
 
 class InternalServiceScope(StrEnum):
+    UPLOAD_INSPECT = "upload.inspect"
+    CONTENT_NORMALIZE = "content.normalize"
     CONTEXT_INDEX_WRITE = "context.index.write"
     CONTEXT_RETRIEVE = "context.retrieve"
     AGENT_RUNTIME_EXECUTE = "agent.runtime.execute"

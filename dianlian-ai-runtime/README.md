@@ -304,6 +304,55 @@ readiness 会要求该登录只能执行 `request_runtime_run_cancel`，不能�
 `deer_runtime` 函数、表、列、序列或 schema create 权限。migration `015` 同时从
 通用 executor 收回该函数，避免 worker DSN 被复用成外部控制通道。
 
+## 隔离上传检查服务（默认关闭）
+
+上传检查使用独立 FastAPI 进程和 `upload.inspect` 单一 Service JWT scope。它只接受
+Java 签发的精确对象版本短时 HTTPS 读取能力，不接收对象键、OSS 凭据或浏览器令牌；
+下载后会重算长度与 SHA-256、识别允许媒体类型，并通过 clamd 原生 `VERSION` 和
+`INSTREAM` 协议完成恶意内容扫描。Tika/Docling 不能替代此安全检查。
+
+服务与 clamd 均默认关闭。目标环境必须显式提供允许的对象存储读取 Host、独立 clamd
+地址和内部服务公钥环；签名 URL 不得写入日志：
+
+```bash
+DIANLIAN_UPLOAD_INSPECTION_SERVICE_ENABLED=true \
+DIANLIAN_UPLOAD_INSPECTION_ALLOWED_SOURCE_HOSTS='objects.example.com' \
+DIANLIAN_UPLOAD_INSPECTION_CLAMD_HOST='clamd.internal' \
+DIANLIAN_UPLOAD_INSPECTION_CLAMD_PORT=3310 \
+DIANLIAN_SERVICE_JWT_PUBLIC_KEY_RING_JSON='{"<kid>":"/absolute/path/to/public-key.pem"}' \
+uv run uvicorn dianlian_runtime.upload_inspection.app:create_upload_inspection_app \
+  --factory --host 127.0.0.1 --port 8093
+```
+
+仓库不固定或部署任何 ClamAV 容器镜像；真实病毒库更新、网络隔离、EICAR、对象存储
+精确版本和 TLS 验收仍是目标环境的开门条件。
+
+## 隔离内容规范化服务（默认关闭）
+
+`POST /internal/v1/content/normalize` 是独立 FastAPI 进程，只接受
+`content.normalize` 单一 Service JWT scope。Java 为已验证的精确对象版本签发短时
+HTTPS GET 能力；Python 不接对象键或对象存储凭据，下载后重新校验长度与 SHA-256，
+再把临时文件交给部署时明确选择的单一 Docling 或 Tika 服务。两侧都不做 AUTO 猜测、
+引擎 fallback 或内联重试，错误响应正文与签名 URL 不进入日志。
+
+目标环境需要单独部署并固定 Docling Serve 或 Tika Server 的镜像与版本。本仓库只
+提供防腐 HTTP Wrapper，不把第三方解析器打包进 Runtime，也不把 Tika 当作病毒扫描器：
+
+```bash
+DIANLIAN_CONTENT_NORMALIZATION_SERVICE_ENABLED=true \
+DIANLIAN_CONTENT_NORMALIZATION_SERVICE_ENGINE=DOCLING \
+DIANLIAN_CONTENT_NORMALIZATION_ALLOWED_SOURCE_HOSTS='objects.example.com' \
+DIANLIAN_CONTENT_NORMALIZATION_PARSER_BASE_URL='https://docling.internal' \
+DIANLIAN_CONTENT_NORMALIZATION_PARSER_API_KEY='<optional-secret>' \
+DIANLIAN_SERVICE_JWT_PUBLIC_KEY_RING_JSON='{"<kid>":"/absolute/path/to/public-key.pem"}' \
+uv run uvicorn dianlian_runtime.content_normalization.app:create_content_normalization_app \
+  --factory --host 127.0.0.1 --port 8092
+```
+
+使用 Tika 时把 engine 改为 `TIKA` 并指向独立 Tika Server。仅本地开发可显式允许
+loopback HTTP；其它地址必须使用 HTTPS。当前基础合同只返回有序 `TEXT` 分段，不宣称
+已经冻结页码、表格坐标或图片区域等富定位信息。
+
 ## 数据库迁移
 
 应用启动只检查迁移版本，绝不自动建表。先向独立 CLI 注入专用 PostgreSQL DSN：

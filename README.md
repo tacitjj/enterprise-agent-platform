@@ -31,6 +31,7 @@ flowchart LR
     Contracts --> Java["Java 21 + Spring Boot + Spring Modulith control plane"]
     Java --> Truth["Tenant, ACL, task, billing and audit truth"]
     Java --> Runtime["FastAPI runtime boundary"]
+    Runtime --> Ingestion["Isolated upload inspection and content normalization"]
     Runtime --> Context["Authorized knowledge and memory retrieval"]
     Runtime --> Supervisor["Durable run supervisor and permit gates"]
     Supervisor --> Agents["Governed and structured agent workers"]
@@ -59,6 +60,7 @@ Read the concise [architecture overview](docs/architecture/overview.md) or the d
 | Versioned API and event contracts | Implemented | Public and internal OpenAPI plus AsyncAPI contracts and fixtures |
 | React application surfaces | Working prototype, API migration in progress | API mode fails visibly and does not fall back to demo facts |
 | FastAPI context boundary | Implemented and tested | Health, internal authentication, indexing, retrieval, migrations, and PostgreSQL integration |
+| Secure ingestion boundary | Experimental and tested | Default-off isolated upload inspection and content normalization services with exact-source capabilities, digest verification, ClamAV, and explicit Docling/Tika selection |
 | Durable runtime foundations | Experimental, implemented, and tested | Gated DeerFlow H0/H1 harnesses, 23 explicit Supervisor migrations, lease/fencing and permit/arm/outcome boundaries, PostgreSQL checkpoints, cross-process takeover, and default-off governed/structured workers |
 | Production deployment | Not supported | Independent hardening, threat modeling, observability, and operational review are still required |
 
