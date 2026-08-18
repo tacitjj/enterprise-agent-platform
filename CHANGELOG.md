@@ -16,6 +16,8 @@ All notable public changes are documented here. The format follows [Keep a Chang
 - Default-off governed H12 and structured 3.0 worker compositions with durable PostgreSQL checkpoints.
 - Dedicated admission, model, and tool permit issuers; one-shot dispatch authorization; canonical-outcome reconciliation; and read-only run projection boundaries.
 - Fenced crash takeover that preserves immutable intent and exact request receipts without authorizing duplicate external calls.
+- Default-off isolated upload inspection with exact-source capabilities, digest/media verification, and native ClamAV `INSTREAM` scanning.
+- Default-off content normalization with explicit Docling or Tika selection, bounded downloads, digest verification, and strict normalized-segment contracts.
 
 ### Changed
 

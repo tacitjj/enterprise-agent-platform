@@ -7,6 +7,7 @@ This roadmap separates implemented foundations from planned work. It is directio
 - Java 21 modular control plane for identity, enterprise agents, tasks, billing, knowledge, memory, context, model routing, interaction, and integrations.
 - Versioned public/internal OpenAPI contracts, AsyncAPI events, and fixtures.
 - FastAPI context indexing and retrieval boundary with internal authentication and PostgreSQL migrations.
+- Default-off isolated upload inspection and content normalization services with exact-source HTTPS capabilities, digest verification, ClamAV integration, and explicit Docling/Tika parser selection.
 - Gated DeerFlow H0/H1 harnesses and durable Supervisor foundations with 23 explicit migrations, lease fencing, terminal-event invariants, external-permit authorization, one-shot dispatch arms, and canonical-outcome reconciliation.
 - Default-off governed H12 and structured 3.0 workers with PostgreSQL checkpoints and fenced cross-process takeover.
 - React user, enterprise administration, and platform operation surfaces with explicit API adapters.
@@ -25,6 +26,7 @@ This roadmap separates implemented foundations from planned work. It is directio
 
 - Controlled tool execution and remote side-effect reconciliation.
 - Multi-node soak tests and operational recovery drills for governed workers.
+- Target-environment ClamAV, Docling/Tika, TLS, large-file, and malware-fixture validation for the isolated ingestion services.
 - Retrieval quality evaluation and optional GraphRAG based on measured need.
 - Production deployment guidance after threat modeling and security review.
 
