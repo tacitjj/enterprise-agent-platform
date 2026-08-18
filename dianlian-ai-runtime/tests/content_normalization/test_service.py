@@ -68,6 +68,15 @@ def test_service_rejects_engine_host_redirect_and_object_identity_drift() -> Non
         _service(PDF, status_code=302).normalize(_request())
     with pytest.raises(ContentNormalizationSourceConflict):
         _service(PDF + b"drift").normalize(_request())
+    with pytest.raises(ContentNormalizationSourceConflict):
+        _service(PDF).normalize(
+            _request(
+                source={
+                    **_source(),
+                    "sourceReadUrl": "https://objects.internal/source\x01?signed=secret",
+                }
+            )
+        )
 
 
 def _service(content: bytes, status_code: int = 200) -> IsolatedContentNormalizationService:

@@ -23,6 +23,7 @@ from dianlian_runtime.upload_inspection.settings import UploadInspectionSettings
 
 NOW = datetime(2026, 8, 18, 7, 0, tzinfo=timezone.utc)
 PDF = b"%PDF-1.7\ncontrolled content\n%%EOF\n"
+JPEG = b"\xff\xd8\xffcontrolled-content\xff\xd9"
 PNG = b"\x89PNG\r\n\x1a\n" + b"payload" + b"IEND\xaeB`\x82"
 
 
@@ -93,6 +94,34 @@ def test_source_host_expiry_and_malformed_media_fail_closed() -> None:
     with pytest.raises(UploadInspectionUnsupportedMedia):
         _service(b"not-a-pdf", RecordingClamd()).inspect(
             _request(b"not-a-pdf", "application/pdf")
+        )
+    with pytest.raises(UploadInspectionSourceConflict):
+        _service(PDF, RecordingClamd()).inspect(
+            _request(
+                PDF,
+                "application/pdf",
+                source_url="https://objects.internal/read\x01?signed=secret",
+            )
+        )
+
+
+def test_pdf_and_jpeg_allow_only_safe_trailing_padding() -> None:
+    padded_pdf = PDF + b"\n \t"
+    padded_jpeg = JPEG + b"\x00\n"
+
+    pdf = _service(padded_pdf, RecordingClamd()).inspect(
+        _request(padded_pdf, "application/pdf")
+    )
+    jpeg = _service(padded_jpeg, RecordingClamd()).inspect(
+        _request(padded_jpeg, "image/jpeg")
+    )
+
+    assert pdf.detected_media_type == "application/pdf"
+    assert jpeg.detected_media_type == "image/jpeg"
+
+    with pytest.raises(UploadInspectionUnsupportedMedia):
+        _service(JPEG + b"hidden", RecordingClamd()).inspect(
+            _request(JPEG + b"hidden", "image/jpeg")
         )
 
 

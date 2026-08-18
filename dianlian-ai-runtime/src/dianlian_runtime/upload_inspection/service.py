@@ -16,7 +16,6 @@ import zipfile
 import httpx
 
 from dianlian_runtime.upload_inspection.contracts import (
-    MAX_CONTENT_LENGTH,
     UploadInspectionOutcome,
     UploadInspectionRequest,
     UploadInspectionResponse,
@@ -248,6 +247,10 @@ class ClamAvUploadInspectionService:
         )
 
     def _require_safe_source(self, request: UploadInspectionRequest) -> None:
+        if _contains_ascii_control(request.source_read_url):
+            raise UploadInspectionSourceConflict(
+                "source read capability is not allowed"
+            )
         parsed = urlsplit(request.source_read_url)
         host = parsed.hostname.lower() if parsed.hostname else None
         try:
@@ -296,7 +299,7 @@ class ClamAvUploadInspectionService:
                     )
                 for chunk in response.iter_raw():
                     length += len(chunk)
-                    if length > MAX_CONTENT_LENGTH:
+                    if length > request.declared_content_length:
                         raise UploadInspectionSourceConflict(
                             "source object exceeds upload-policy-v1"
                         )
@@ -304,7 +307,7 @@ class ClamAvUploadInspectionService:
                     target.write(chunk)
         except (UploadInspectionSourceConflict, UploadInspectionUnsupportedMedia):
             raise
-        except (httpx.HTTPError, OSError):
+        except (httpx.HTTPError, httpx.InvalidURL, httpx.StreamError, OSError):
             # httpx 异常可能包含签名 URL，禁止将原异常链带入日志或响应。
             raise UploadInspectionUnavailable("source object is unavailable") from None
         if length == 0:
@@ -338,12 +341,21 @@ def _receive_bounded(connection: socket.socket) -> str:
 def _detect_media_type(content: BinaryIO, declared_media_type: str) -> str:
     content.seek(0)
     head = content.read(16)
-    content.seek(-min(_file_size(content), 32), 2)
-    tail = content.read(32)
+    tail_window = min(_file_size(content), 4096)
+    content.seek(-tail_window, 2)
+    tail = content.read(tail_window)
     content.seek(0)
-    if head.startswith(b"%PDF-") and b"%%EOF" in tail:
+    if head.startswith(b"%PDF-") and _has_safe_trailer(
+        tail,
+        b"%%EOF",
+        b"\t\n\r\f ",
+    ):
         return "application/pdf"
-    if head.startswith(b"\xff\xd8\xff") and tail.endswith(b"\xff\xd9"):
+    if head.startswith(b"\xff\xd8\xff") and _has_safe_trailer(
+        tail,
+        b"\xff\xd9",
+        b"\x00\t\n\r\f ",
+    ):
         return "image/jpeg"
     if head.startswith(b"\x89PNG\r\n\x1a\n") and b"IEND" in tail:
         return "image/png"
@@ -361,6 +373,22 @@ def _file_size(content: BinaryIO) -> int:
     size = content.tell()
     content.seek(0)
     return size
+
+
+def _has_safe_trailer(tail: bytes, marker: bytes, allowed_padding: bytes) -> bool:
+    """只允许终止标记后的有限安全填充，避免接受任意尾随载荷。"""
+
+    marker_index = tail.rfind(marker)
+    if marker_index < 0:
+        return False
+    trailer = tail[marker_index + len(marker) :]
+    return all(byte in allowed_padding for byte in trailer)
+
+
+def _contains_ascii_control(value: str) -> bool:
+    """拒绝 HTTP 客户端可能延迟报错的 ASCII 控制字符。"""
+
+    return any(ord(character) < 32 or ord(character) == 127 for character in value)
 
 
 def _detect_ooxml(content: BinaryIO) -> str:

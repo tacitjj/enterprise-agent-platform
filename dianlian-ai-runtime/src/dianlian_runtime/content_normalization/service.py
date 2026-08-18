@@ -11,7 +11,6 @@ from urllib.parse import urlsplit
 import httpx
 
 from dianlian_runtime.content_normalization.contracts import (
-    MAX_CONTENT_LENGTH,
     MAX_NORMALIZED_TEXT_LENGTH,
     ContentNormalizationRequest,
     ContentNormalizationResponse,
@@ -229,6 +228,10 @@ class IsolatedContentNormalizationService:
         )
 
     def _require_safe_source(self, request: ContentNormalizationRequest) -> None:
+        if _contains_ascii_control(request.source.source_read_url):
+            raise ContentNormalizationSourceConflict(
+                "source read capability is not allowed"
+            )
         parsed = urlsplit(request.source.source_read_url)
         host = parsed.hostname.lower() if parsed.hostname else None
         try:
@@ -269,7 +272,7 @@ class IsolatedContentNormalizationService:
                     )
                 for chunk in response.iter_raw():
                     length += len(chunk)
-                    if length > MAX_CONTENT_LENGTH:
+                    if length > request.source.content_length:
                         raise ContentNormalizationSourceConflict(
                             "source object exceeds upload-policy-v1"
                         )
@@ -277,7 +280,7 @@ class IsolatedContentNormalizationService:
                     target.write(chunk)
         except ContentNormalizationSourceConflict:
             raise
-        except (httpx.HTTPError, OSError):
+        except (httpx.HTTPError, httpx.InvalidURL, httpx.StreamError, OSError):
             # HTTP 异常可能包含签名 URL，禁止传播原异常链。
             raise ContentNormalizationUnavailable("source object is unavailable") from None
         if length == 0 or self._clock() >= request.source.source_expires_at:
@@ -303,6 +306,7 @@ def create_parser(
 def _parser_client(settings: ContentNormalizationSettings) -> httpx.Client:
     return httpx.Client(
         base_url=settings.parser_base_url or "",
+        headers={"Accept-Encoding": "identity"},
         timeout=httpx.Timeout(
             settings.parser_read_timeout_seconds,
             connect=settings.parser_connect_timeout_seconds,
@@ -352,6 +356,12 @@ def _read_bounded_response(response: httpx.Response) -> bytes:
         if len(body) > _MAX_PARSER_RESPONSE_BYTES:
             raise ContentNormalizationContractRejected("parser response is too large")
     return bytes(body)
+
+
+def _contains_ascii_control(value: str) -> bool:
+    """拒绝 HTTP 客户端可能延迟报错的 ASCII 控制字符。"""
+
+    return any(ord(character) < 32 or ord(character) == 127 for character in value)
 
 
 def _normalize_and_split(value: str) -> list[str]:

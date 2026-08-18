@@ -84,8 +84,8 @@ class _NormalizationJsonBodyGuard:
                 return
             if message["type"] != "http.request":
                 continue
-            body.extend(message.get("body", b""))
-            if len(body) > _BODY_LIMIT_BYTES:
+            chunk = message.get("body", b"")
+            if len(body) + len(chunk) > _BODY_LIMIT_BYTES:
                 await _send_problem(
                     scope,
                     receive,
@@ -95,6 +95,7 @@ class _NormalizationJsonBodyGuard:
                     "The content normalization request is too large",
                 )
                 return
+            body.extend(chunk)
             if not message.get("more_body", False):
                 break
         try:
