@@ -159,3 +159,7 @@ Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a change. General questions belong in [GitHub Discussions or Issues](SUPPORT.md), while security reports must use the private advisory flow.
 
 This project is available under the [MIT License](LICENSE).
+
+## Contract reference
+
+- [English contract reference](docs/contract-reference.en.md)
